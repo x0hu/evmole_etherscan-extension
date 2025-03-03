@@ -44,12 +44,10 @@ The extension requires minimal permissions:
 - Only runs on Etherscan domains
 - No data collection or tracking
 
-## Development
+## TODO 
 
-To modify the extension:
-1. Make your changes to the source files
-2. Reload the extension in Chrome
-3. Test on Etherscan contract pages
+- add support for other etherscan forks
+
 
 ## Credits
 
