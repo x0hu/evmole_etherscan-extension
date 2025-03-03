@@ -1,0 +1,64 @@
+.selector-item {
+  margin-bottom: 8px;
+  border-bottom: 1px solid #2d2f31;
+  padding-bottom: 4px;
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.selector-info, .function-info {
+  margin-bottom: 2px;
+}
+
+.selector-id {
+  font-weight: bold;
+  color: #3498db;
+  font-family: monospace;
+}
+
+.arguments {
+  color: #95a5a6;
+  margin-left: 4px;
+}
+
+.mutability {
+  font-style: italic;
+  color: #2ecc71;
+  margin-left: 4px;
+}
+
+.function-name {
+  color: #bdc3c7;
+  margin-left: 12px;
+  font-size: 13px;
+}
+
+/* Additional styles for the panel */
+#selectors {
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 10px;
+}
+
+/* Scrollbar styles */
+#selectors::-webkit-scrollbar {
+  width: 8px;
+}
+
+#selectors::-webkit-scrollbar-track {
+  background: #1c1e21;
+}
+
+#selectors::-webkit-scrollbar-thumb {
+  background: #2d2f31;
+  border-radius: 4px;
+}
+
+#selectors::-webkit-scrollbar-thumb:hover {
+  background: #3d3f41;
+}
+
+.highlight-non-standard {
+  background-color: rgba(255, 165, 0, 0.2); /* Semi-transparent orange */
+  border-left: 3px solid orange;
+}

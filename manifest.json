@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Evmole for Etherscan",
+  "version": "1.0",
+  "description": "Displays function selectors for Ethereum contracts on Etherscan",
+  "permissions": ["activeTab"],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://etherscan.io/address/*",
+        "https://etherscan.io/token/*"
+      ],
+      "js": ["content.js", "etherscan_contract_info.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["evmole-script.js", "styles.css"],
+      "matches": ["https://etherscan.io/*"]
+    }
+  ]
+}
