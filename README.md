@@ -10,12 +10,13 @@ A Chrome extension that enhances Etherscan by displaying function selectors for 
 - Easy to use with a non-intrusive interface
 - Purposely does not highlight erc20 functions
 
-## Screenshots
+## Examples
 
 ![Contract Overview](screenshot1.png)
 *Contract overview with function selector panel*
 
 ![Function Details](screenshot2.png)
+
 *Detailed view of contract functions with selectors*
 
 ## Installation
