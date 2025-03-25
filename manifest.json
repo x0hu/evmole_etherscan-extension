@@ -8,7 +8,19 @@
     {
       "matches": [
         "https://etherscan.io/address/*",
-        "https://etherscan.io/token/*"
+        "https://etherscan.io/token/*",
+        "https://basescan.org/address/*",
+        "https://basescan.org/token/*",
+        "https://bscscan.com/address/*",
+        "https://bscscan.com/token/*",
+        "https://arbiscan.io/address/*",
+        "https://arbiscan.io/token/*",
+        "https://snowtrace.io/address/*",
+        "https://snowtrace.io/token/*",
+        "https://uniscan.xyz/address/*",
+        "https://uniscan.xyz/token/*",
+        "https://sonicscan.org/address/*",
+        "https://sonicscan.org/token/*"
       ],
       "js": ["content.js", "etherscan_contract_info.js"]
     }
@@ -16,7 +28,7 @@
   "web_accessible_resources": [
     {
       "resources": ["evmole-script.js", "styles.css"],
-      "matches": ["https://etherscan.io/*"]
+      "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://uniscan.xyz/*", "https://sonicscan.org/*"]
     }
   ]
 }
