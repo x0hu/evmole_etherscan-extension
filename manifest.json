@@ -20,7 +20,9 @@
         "https://uniscan.xyz/address/*",
         "https://uniscan.xyz/token/*",
         "https://sonicscan.org/address/*",
-        "https://sonicscan.org/token/*"
+        "https://sonicscan.org/token/*",
+        "https://hyperevmscan.io/address/*",
+        "https://hyperevmscan.io/token/*"
       ],
       "js": ["content.js", "etherscan_contract_info.js"]
     }
