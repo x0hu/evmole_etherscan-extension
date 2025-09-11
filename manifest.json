@@ -22,7 +22,19 @@
         "https://sonicscan.org/address/*",
         "https://sonicscan.org/token/*",
         "https://hyperevmscan.io/address/*",
-        "https://hyperevmscan.io/token/*"
+        "https://hyperevmscan.io/token/*",
+        "https://polygonscan.com/address/*",
+        "https://polygonscan.com/token/*",
+        "https://optimistic.etherscan.io/address/*",
+        "https://optimistic.etherscan.io/token/*",
+        "https://lineascan.build/address/*",
+        "https://lineascan.build/token/*",
+        "https://worldscan.org/address/*",
+        "https://worldscan.org/token/*",
+        "https://abscan.org/address/*",
+        "https://abscan.org/token/*",
+        "https://testnet.monadscan.com/address/*",
+        "https://testnet.monadscan.com/token/*"
       ],
       "js": ["content.js", "etherscan_contract_info.js"]
     }
@@ -30,7 +42,9 @@
   "web_accessible_resources": [
     {
       "resources": ["evmole-script.js", "styles.css"],
-      "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://uniscan.xyz/*", "https://sonicscan.org/*"]
+      "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", 
+      "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
+      "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*"]
     }
   ]
 }
