@@ -70,11 +70,25 @@
         "https://testnet.monadscan.com/tx*",
         "https://testnet.monadscan.com/txs*",
         "https://era.zksync.network/address/*",
+        "https://era.zksync.network/token/*",
         "https://era.zksync.network/tx*",
         "https://era.zksync.network/txs*",
         "https://scrollscan.com/address/*",
+        "https://scrollscan.com/token/*",
         "https://scrollscan.com/tx*",
-        "https://scrollscan.com/txs*"
+        "https://scrollscan.com/txs*",
+        "https://berascan.com/address/*",
+        "https://berascan.com/token/*",
+        "https://berascan.com/tx*",
+        "https://berascan.com/txs*",
+        "https://apescan.io/address/*",
+        "https://apescan.io/token/*",
+        "https://apescan.io/tx*",
+        "https://apescan.io/txs*",
+        "https://mantlescan.xyz/address/*",
+        "https://mantlescan.xyz/token/*",
+        "https://mantlescan.xyz/tx*",
+        "https://mantlescan.xyz/txs*"
       ],
       "js": ["content.js", "etherscan_contract_info.js", "qol_buttons.js"]
     }
@@ -84,7 +98,7 @@
       "resources": ["evmole-script.js", "styles.css"],
       "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://blastscan.io/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://snowscan.xyz/*",
       "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
-      "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*"]
+      "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*", "https://berascan.com/*", "https://apescan.io/*", "https://mantlescan.xyz/*"]
     }
   ]
 }
