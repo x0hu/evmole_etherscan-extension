@@ -13,7 +13,7 @@ function injectScript(file, node) {
     panel.style.transform = 'translateY(-50%)';
     panel.style.width = '400px';
     panel.style.padding = '15px';
-    panel.style.backgroundColor = '#1c1e21';
+    panel.style.backgroundColor = 'rgba(28, 30, 33, 0.4)';
     panel.style.border = '1px solid #2d2f31';
     panel.style.borderRadius = '5px';
     panel.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
