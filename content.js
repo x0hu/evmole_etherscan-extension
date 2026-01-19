@@ -60,6 +60,11 @@ function injectScript(file, node) {
     document.head.appendChild(link);
   }
 
+  function getContractAddress() {
+    const match = window.location.pathname.match(/\/address\/(0x[a-fA-F0-9]{40})/);
+    return match ? match[1] : null;
+  }
+
   function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
     const bytecodeElements = Array.from(document.querySelectorAll('pre.wordwrap.scrollbar-custom, .wordwrap.scrollbar-custom'));
@@ -91,23 +96,37 @@ function injectScript(file, node) {
       'rescueERC20(address,uint256)'
     ];
 
+    const contractAddress = getContractAddress();
+
     const messageHandler = function(event) {
       if (event.data && event.data.type === 'FUNCTION_SELECTORS_RESULT') {
         if (event.data.selectors && Array.isArray(event.data.selectors) && event.data.selectors.length > 0) {
-          const selectorsHtml = event.data.selectors.map(selector => {
-            if (typeof selector !== 'string') return '';
+          const readFunctions = [];
+          const writeFunctions = [];
+
+          event.data.selectors.forEach(selector => {
+            if (typeof selector !== 'string') return;
             const [selectorInfo, signatureInfo] = selector.split('\n');
-            if (!selectorInfo || !signatureInfo) return '';
+            if (!selectorInfo || !signatureInfo) return;
             const [selectorId, argsAndMutability] = selectorInfo.split(': ');
-            if (!selectorId || !argsAndMutability) return '';
+            if (!selectorId || !argsAndMutability) return;
             const [args, mutability] = argsAndMutability.split(' ');
             const functionName = signatureInfo.trim();
-            
+
             const isNonStandard = !standardERC20Functions.includes(functionName);
             const highlightClass = isNonStandard ? 'highlight-non-standard' : '';
 
-            return `
-              <div class="selector-item ${highlightClass}">
+            // Check if no-arg read function (queryable)
+            const isNoArgRead = (mutability === 'view' || mutability === 'pure') &&
+                                args === '()' &&
+                                functionName !== 'Unknown';
+            const queryableClass = isNoArgRead ? 'queryable' : '';
+
+            const itemHtml = `
+              <div class="selector-item ${highlightClass} ${queryableClass}"
+                   data-selector="${selectorId}"
+                   data-signature="${functionName}"
+                   data-queryable="${isNoArgRead}">
                 <div class="selector-info">
                   <span class="selector-id">${selectorId}</span>
                   <span class="arguments">${args}</span>
@@ -116,15 +135,143 @@ function injectScript(file, node) {
                 <div class="function-info">
                   <span class="function-name">${functionName}</span>
                 </div>
+                ${isNoArgRead ? `<div class="query-dropdown" style="display:none;">
+                  <button class="query-btn">Query</button>
+                  <div class="query-result"></div>
+                </div>` : ''}
               </div>
             `;
-          }).join('');
+
+            if (mutability === 'view' || mutability === 'pure') {
+              readFunctions.push(itemHtml);
+            } else {
+              writeFunctions.push(itemHtml);
+            }
+          });
+
+          let selectorsHtml = '';
+          if (readFunctions.length > 0) {
+            selectorsHtml += `<div class="section-header">Read Functions</div>`;
+            selectorsHtml += readFunctions.join('');
+          }
+          if (writeFunctions.length > 0) {
+            if (readFunctions.length > 0) {
+              selectorsHtml += `<div class="section-divider"></div>`;
+            }
+            selectorsHtml += `<div class="section-header write-section">Write Functions</div>`;
+            selectorsHtml += writeFunctions.join('');
+          }
 
           if (panel && panel.parentNode) {
             panel.innerHTML = selectorsHtml;
+
+            // Add click handlers for queryable functions
+            panel.querySelectorAll('.selector-item.queryable').forEach(item => {
+              item.addEventListener('click', (e) => {
+                if (e.target.classList.contains('query-btn')) return;
+                const dropdown = item.querySelector('.query-dropdown');
+                dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+              });
+
+              const queryBtn = item.querySelector('.query-btn');
+              if (queryBtn) {
+                queryBtn.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  const selector = item.dataset.selector;
+                  const signature = item.dataset.signature;
+                  const resultDiv = item.querySelector('.query-result');
+                  resultDiv.className = 'query-result loading';
+                  resultDiv.textContent = 'Loading...';
+
+                  window.postMessage({
+                    type: 'QUERY_READ_FUNCTION',
+                    selector,
+                    signature,
+                    contractAddress
+                  }, '*');
+                });
+              }
+            });
           }
         } else if (panel && panel.parentNode) {
           panel.innerHTML = '<div>No function selectors found or source code compilation not implemented.</div>';
+        }
+      }
+
+      // Handle query results
+      if (event.data && event.data.type === 'QUERY_RESULT') {
+        const { selector, success, result, error } = event.data;
+        const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
+        if (item) {
+          const resultDiv = item.querySelector('.query-result');
+          if (success) {
+            resultDiv.className = 'query-result success';
+            const copyId = 'copyIcon_' + selector.replace('0x', '');
+            const isNumeric = !result.startsWith('0x') && /^\d+$/.test(result);
+
+            let unitDropdown = '';
+            if (isNumeric) {
+              unitDropdown = `
+                <div class="unit-dropdown">
+                  <a class="link-secondary unit-toggle" href="javascript:;" title="Convert units"><i class="fas fa-exchange-alt fa-fw"></i></a>
+                  <div class="unit-menu">
+                    <a href="javascript:;" data-unit="1" class="unit-option active">Wei</a>
+                    <a href="javascript:;" data-unit="1e6" class="unit-option">/ 10⁶</a>
+                    <a href="javascript:;" data-unit="1e9" class="unit-option">Gwei</a>
+                    <a href="javascript:;" data-unit="1e18" class="unit-option">Ether</a>
+                  </div>
+                </div>`;
+            }
+
+            resultDiv.innerHTML = `<span class="result-value">${result}</span>${unitDropdown}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
+
+            // Unit conversion
+            if (isNumeric) {
+              const rawValue = BigInt(result);
+              const valueSpan = resultDiv.querySelector('.result-value');
+              const dropdown = resultDiv.querySelector('.unit-dropdown');
+              const toggle = dropdown.querySelector('.unit-toggle');
+              const menu = dropdown.querySelector('.unit-menu');
+
+              toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                menu.classList.toggle('show');
+              });
+
+              dropdown.querySelectorAll('.unit-option').forEach(opt => {
+                opt.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  dropdown.querySelectorAll('.unit-option').forEach(o => o.classList.remove('active'));
+                  opt.classList.add('active');
+                  const divisor = BigInt(parseFloat(opt.dataset.unit));
+                  const converted = divisor === 1n ? rawValue.toString() : (Number(rawValue) / Number(divisor)).toString();
+                  valueSpan.textContent = converted;
+                  resultDiv.querySelector('.js-clipboard').dataset.clipboardText = converted;
+                  menu.classList.remove('show');
+                });
+              });
+
+              document.addEventListener('click', () => menu.classList.remove('show'), { once: false });
+            }
+
+            resultDiv.querySelector('.js-clipboard').addEventListener('click', (e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              navigator.clipboard.writeText(e.currentTarget.dataset.clipboardText);
+              const icon = document.getElementById(copyId);
+              icon.classList.remove('fa-copy');
+              icon.classList.add('fa-check');
+              setTimeout(() => {
+                icon.classList.remove('fa-check');
+                icon.classList.add('fa-copy');
+              }, 1000);
+            });
+          } else {
+            resultDiv.className = 'query-result error';
+            resultDiv.textContent = error;
+          }
         }
       }
     };

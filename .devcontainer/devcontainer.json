@@ -44,7 +44,9 @@
     "source=claude-code-config,target=/home/node/.claude,type=volume",
     "source=codex-config,target=/home/node/.codex,type=volume",
     "source=gh-config,target=/home/node/.config/gh,type=volume",
-    "source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,consistency=cached,readonly"
+    "source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,consistency=cached,readonly",
+    "source=${localEnv:HOME}/.tmux.conf,target=/home/node/.tmux.conf,type=bind",
+    "source=${localEnv:HOME}/.tmux,target=/home/node/.tmux,type=bind"
   ],
   "containerEnv": {
     "NODE_OPTIONS": "--max-old-space-size=4096",

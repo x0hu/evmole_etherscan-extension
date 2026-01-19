@@ -62,3 +62,150 @@
   background-color: rgba(255, 165, 0, 0.2); /* Semi-transparent orange */
   border-left: 3px solid orange;
 }
+
+.section-header {
+  font-weight: bold;
+  color: #3498db;
+  font-size: 14px;
+  margin: 8px 0 6px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #3498db;
+}
+
+.section-header.write-section {
+  color: #e67e22;
+  border-bottom-color: #e67e22;
+  margin-top: 16px;
+}
+
+.section-divider {
+  height: 2px;
+  background: linear-gradient(to right, transparent, #e67e22, transparent);
+  margin: 16px 0;
+}
+
+/* Queryable function styles */
+.selector-item.queryable {
+  cursor: pointer;
+}
+
+.selector-item.queryable:hover {
+  background-color: rgba(52, 152, 219, 0.15);
+}
+
+.query-dropdown {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.query-btn {
+  background: #3498db;
+  color: white;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.query-btn:hover {
+  background: #2980b9;
+}
+
+.query-result {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.query-result:empty {
+  display: none;
+}
+
+.query-result.loading {
+  color: #95a5a6;
+  display: block;
+}
+
+.query-result.success {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+  display: block;
+}
+
+.query-result.error {
+  background: rgba(231, 76, 60, 0.2);
+  color: #e74c3c;
+  display: block;
+}
+
+.query-result.success {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.result-value {
+  flex: 1;
+  word-break: break-all;
+  font-size: 11px;
+}
+
+.query-result .js-clipboard,
+.query-result .unit-toggle {
+  flex-shrink: 0;
+  margin-left: 4px;
+  color: #95a5a6;
+}
+
+.query-result .js-clipboard:hover,
+.query-result .unit-toggle:hover {
+  color: #3498db;
+}
+
+.unit-dropdown {
+  position: relative;
+  display: inline-flex;
+}
+
+.unit-menu {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1c1e21;
+  border: 1px solid #2d2f31;
+  border-radius: 4px;
+  padding: 4px 0;
+  z-index: 100;
+  min-width: 70px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.unit-menu.show {
+  display: block;
+}
+
+.unit-option {
+  display: block;
+  padding: 4px 10px;
+  color: #bdc3c7;
+  text-decoration: none;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.unit-option:hover {
+  background: rgba(52, 152, 219, 0.2);
+  color: #3498db;
+}
+
+.unit-option.active {
+  color: #2ecc71;
+}
