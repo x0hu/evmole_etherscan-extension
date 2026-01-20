@@ -150,6 +150,17 @@ function injectScript(file, node) {
           });
 
           let selectorsHtml = '';
+
+          // Show implementation address if proxy detected
+          if (event.data.implementationAddress) {
+            const implAddr = event.data.implementationAddress;
+            const shortAddr = implAddr.slice(0, 6) + '...' + implAddr.slice(-4);
+            selectorsHtml += `<div class="impl-notice">
+              <span>📦 Proxy → </span>
+              <a href="/address/${implAddr}" target="_blank" class="impl-link">${shortAddr}</a>
+            </div>`;
+          }
+
           if (readFunctions.length > 0) {
             selectorsHtml += `<div class="section-header">Read Functions</div>`;
             selectorsHtml += readFunctions.join('');

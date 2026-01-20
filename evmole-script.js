@@ -1,6 +1,17 @@
 import { functionSelectors, functionArguments, functionStateMutability } from 'https://cdn.jsdelivr.net/npm/evmole@0.5.1/dist/evmole.mjs';
 import { createPublicClient, http } from 'https://esm.sh/viem@2.21.0';
 
+// Proxy storage slots
+const PROXY_SLOTS = {
+  EIP1967_IMPL: '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc',
+  EIP1967_BEACON: '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50',
+  EIP1822_LOGIC: '0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7',
+  ZEPPELIN_IMPL: '0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3',
+};
+
+// EIP-1167 minimal proxy pattern
+const MINIMAL_PROXY_REGEX = /^0x363d3d373d3d3d363d73([a-fA-F0-9]{40})5af43d82803e903d91602b57fd5bf3$/;
+
 const CHAIN_CONFIG = {
   'etherscan.io': { rpc: 'https://eth.llamarpc.com' },
   'basescan.org': { rpc: 'https://mainnet.base.org' },
@@ -39,6 +50,86 @@ function getContractAddress() {
   return match ? match[1] : null;
 }
 
+function createClient() {
+  const config = getChainConfig();
+  return createPublicClient({ transport: http(config.rpc) });
+}
+
+async function detectProxyImplementation(client, address, bytecode) {
+  const ZERO_ADDR = '0x' + '0'.repeat(40);
+
+  // 1. Check EIP-1167 minimal proxy (bytecode pattern) - instant, no RPC
+  const match = bytecode.match(MINIMAL_PROXY_REGEX);
+  if (match) {
+    const impl = '0x' + match[1];
+    console.log('EIP-1167 minimal proxy detected, impl:', impl);
+    return impl;
+  }
+
+  // 2. Skip RPC checks if bytecode is large (real contracts, not proxies)
+  // Proxies typically have <500 bytes, real contracts have thousands
+  if (bytecode.length > 1000) {
+    console.log('Large bytecode, skipping proxy RPC checks');
+    return null;
+  }
+
+  // 3. Check storage slots in parallel
+  const slotChecks = Object.entries(PROXY_SLOTS).map(async ([name, slot]) => {
+    try {
+      const value = await client.getStorageAt({ address, slot });
+      if (value && value !== '0x' + '0'.repeat(64)) {
+        const impl = '0x' + value.slice(-40);
+        if (impl !== ZERO_ADDR) {
+          return { name, impl };
+        }
+      }
+    } catch (e) {}
+    return null;
+  });
+
+  // Also check implementation() call in parallel
+  const implCallCheck = (async () => {
+    try {
+      const result = await client.call({
+        to: address,
+        data: '0x5c60da1b', // implementation()
+      });
+      if (result.data && result.data !== '0x' && result.data.length >= 66) {
+        const impl = '0x' + result.data.slice(-40);
+        if (impl !== ZERO_ADDR) {
+          return { name: 'implementation()', impl };
+        }
+      }
+    } catch (e) {}
+    return null;
+  })();
+
+  const results = await Promise.all([...slotChecks, implCallCheck]);
+  const found = results.find(r => r !== null);
+
+  if (found) {
+    console.log(`${found.name} proxy detected, impl:`, found.impl);
+    return found.impl;
+  }
+
+  return null;
+}
+
+async function getImplementationBytecode(client, address, proxyBytecode) {
+  const implAddress = await detectProxyImplementation(client, address, proxyBytecode);
+  if (!implAddress) return null;
+
+  try {
+    const implBytecode = await client.getCode({ address: implAddress });
+    if (implBytecode && implBytecode !== '0x') {
+      return { address: implAddress, bytecode: implBytecode };
+    }
+  } catch (e) {
+    console.log('Failed to fetch implementation bytecode:', e.message);
+  }
+  return null;
+}
+
 function formatResult(result) {
   if (typeof result === 'bigint') {
     const hex = result.toString(16);
@@ -60,6 +151,27 @@ function formatResult(result) {
   return String(result);
 }
 
+function inferOutputType(fnName) {
+  const name = fnName.toLowerCase();
+
+  // String returns
+  if (['name', 'symbol', 'version'].includes(name)) return 'string';
+  if (name.endsWith('uri') || name.endsWith('url')) return 'string';
+
+  // Address returns
+  if (['owner', 'admin', 'implementation', 'beacon'].includes(name)) return 'address';
+  if (name.includes('address') || name.includes('owner') || name.includes('admin')) return 'address';
+
+  // Uint8 returns
+  if (name === 'decimals') return 'uint8';
+
+  // Bool returns
+  if (name.startsWith('is') || name.startsWith('has') || name === 'paused') return 'bool';
+
+  // Default to uint256
+  return 'uint256';
+}
+
 async function queryReadFunction(selector, signature, contractAddress) {
   const config = getChainConfig();
   const client = createPublicClient({
@@ -67,6 +179,7 @@ async function queryReadFunction(selector, signature, contractAddress) {
   });
 
   const fnName = signature.split('(')[0];
+  const outputType = inferOutputType(fnName);
 
   try {
     const result = await client.readContract({
@@ -75,7 +188,7 @@ async function queryReadFunction(selector, signature, contractAddress) {
         type: 'function',
         name: fnName,
         inputs: [],
-        outputs: [{ type: 'uint256' }],
+        outputs: [{ type: outputType }],
         stateMutability: 'view',
       }],
       functionName: fnName,
@@ -120,85 +233,116 @@ async function fetchSignatures(selectors) {
   }
 }
 
-async function extractFunctions() {
+function getBytecodeFromHTML() {
   // Get all pre elements with wordwrap class (excluding ace editors which contain source code)
   let bytecodeElements = [
     ...document.querySelectorAll('pre.wordwrap.scrollbar-custom'),
     ...document.querySelectorAll('pre.wordwrap')
   ].filter(el => {
-    // Exclude ace editors (source code)
     if (el.classList.contains('ace_editor')) return false;
     if (el.id && el.id.startsWith('editor')) return false;
     return true;
   });
 
-  let bytecodeElement = null;
-
   // First pass: find Deployed Bytecode (direct text content, no child divs)
   for (let element of bytecodeElements) {
-    // Skip if bytecode is inside a child element (like #verifiedbytecode2 for creation code)
     if (element.querySelector('#verifiedbytecode2')) continue;
-
     const text = element.textContent.trim();
     if (text.startsWith('0x') && text.length > 100) {
-      bytecodeElement = element;
-      break;
+      return text;
     }
   }
 
-  // Second pass: fall back to Creation Code if no Deployed Bytecode found
-  if (!bytecodeElement) {
-    const verifiedBytecode = document.querySelector('#verifiedbytecode2');
-    if (verifiedBytecode) {
-      const text = verifiedBytecode.textContent.trim();
-      if (text.startsWith('0x') && text.length > 100) {
-        bytecodeElement = verifiedBytecode;
-      }
+  // Second pass: fall back to Creation Code
+  const verifiedBytecode = document.querySelector('#verifiedbytecode2');
+  if (verifiedBytecode) {
+    const text = verifiedBytecode.textContent.trim();
+    if (text.startsWith('0x') && text.length > 100) {
+      return text;
     }
   }
 
   // Last fallback: unverified contracts
-  if (!bytecodeElement) {
-    for (let element of bytecodeElements) {
-      const text = element.textContent.trim();
-      if (text.startsWith('0x') && text.length > 100) {
-        bytecodeElement = element;
-        break;
-      }
+  for (let element of bytecodeElements) {
+    const text = element.textContent.trim();
+    if (text.startsWith('0x') && text.length > 100) {
+      return text;
     }
   }
 
-  if (bytecodeElement) {
-    const code = bytecodeElement.textContent.trim();
-    console.log('Code starts with:', code.substring(0, 50));
-    let selectors;
+  return null;
+}
 
-    // Check if it's bytecode (starts with 0x) or source code
-    if (code.startsWith('0x')) {
-      console.log('Bytecode detected');
-      selectors = functionSelectors(code);
-    } else {
-      console.log('Source code detected, compilation not implemented');
+async function extractFunctions() {
+  const contractAddress = getContractAddress();
+  if (!contractAddress) {
+    console.log('No contract address found');
+    return;
+  }
+
+  // 1. Try HTML first
+  let code = getBytecodeFromHTML();
+  let bytecodeSource = 'html';
+
+  // 2. If HTML fails, fetch via RPC
+  if (!code) {
+    console.log('No bytecode in HTML, fetching via RPC...');
+    try {
+      const client = createClient();
+      code = await client.getCode({ address: contractAddress });
+      if (code && code !== '0x') {
+        bytecodeSource = 'rpc';
+        console.log('Bytecode fetched via RPC');
+      } else {
+        console.log('No bytecode found via RPC');
+        return;
+      }
+    } catch (e) {
+      console.log('RPC fetch failed:', e.message);
       return;
     }
-
-    const signatures = await fetchSignatures(selectors);
-
-    const selectorsWithDetails = await Promise.all(selectors.map(async (selector) => {
-      const args = functionArguments(code, selector);
-      const mutability = functionStateMutability(code, selector);
-      const formattedSelector = selector.startsWith('0x') ? selector : `0x${selector}`;
-      const signatureInfo = signatures[formattedSelector] && signatures[formattedSelector][0] 
-        ? signatures[formattedSelector][0].name 
-        : 'Unknown';
-      return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
-    }));
-
-    console.log('Selectors:', selectorsWithDetails);
-    window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: selectorsWithDetails }, '*');
   } else {
-    console.log('Neither bytecode nor source code found');
+    console.log('Bytecode found in HTML');
   }
+
+  // Check if it's actually bytecode
+  if (!code.startsWith('0x')) {
+    console.log('Source code detected, compilation not implemented');
+    return;
+  }
+
+  // 3. Check for proxy and get implementation bytecode
+  const client = createClient();
+  let implInfo = null;
+  let bytecodeToAnalyze = code;
+
+  implInfo = await getImplementationBytecode(client, contractAddress, code);
+  if (implInfo) {
+    console.log('Proxy detected! Implementation:', implInfo.address);
+    bytecodeToAnalyze = implInfo.bytecode;
+  }
+
+  // 4. Extract and display functions
+  const selectors = functionSelectors(bytecodeToAnalyze);
+  const signatures = await fetchSignatures(selectors);
+
+  const selectorsWithDetails = await Promise.all(selectors.map(async (selector) => {
+    const args = functionArguments(bytecodeToAnalyze, selector);
+    const mutability = functionStateMutability(bytecodeToAnalyze, selector);
+    const formattedSelector = selector.startsWith('0x') ? selector : `0x${selector}`;
+    const signatureInfo = signatures[formattedSelector] && signatures[formattedSelector][0]
+      ? signatures[formattedSelector][0].name
+      : 'Unknown';
+    return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
+  }));
+
+  console.log('Selectors:', selectorsWithDetails);
+  window.postMessage({
+    type: 'FUNCTION_SELECTORS_RESULT',
+    selectors: selectorsWithDetails,
+    implementationAddress: implInfo?.address || null,
+    bytecodeSource
+  }, '*');
 }
 
 // Run the function

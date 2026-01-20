@@ -209,3 +209,28 @@
 .unit-option.active {
   color: #2ecc71;
 }
+
+/* Implementation notice for proxy contracts */
+.impl-notice {
+  background: rgba(155, 89, 182, 0.2);
+  border: 1px solid #9b59b6;
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.impl-link {
+  color: #9b59b6;
+  text-decoration: none;
+  font-family: monospace;
+  font-weight: bold;
+}
+
+.impl-link:hover {
+  color: #a569bd;
+  text-decoration: underline;
+}
