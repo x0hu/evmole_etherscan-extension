@@ -66,10 +66,10 @@ async function detectProxyImplementation(client, address, bytecode) {
     return impl;
   }
 
-  // 2. Skip RPC checks if bytecode is large (real contracts, not proxies)
-  // Proxies typically have <500 bytes, real contracts have thousands
-  if (bytecode.length > 1000) {
-    console.log('Large bytecode, skipping proxy RPC checks');
+  // 2. Skip RPC checks if bytecode is very large (definitely not a proxy)
+  // EIP-1967 transparent proxies can be 2000-6000 chars, real contracts are 10000+
+  if (bytecode.length > 15000) {
+    console.log('Very large bytecode, skipping proxy RPC checks');
     return null;
   }
 
@@ -86,6 +86,20 @@ async function detectProxyImplementation(client, address, bytecode) {
     } catch (e) {}
     return null;
   });
+
+  // 4. Check custom pattern: impl stored at slot = contract address
+  const selfSlotCheck = (async () => {
+    try {
+      const value = await client.getStorageAt({ address, slot: address });
+      if (value && value !== '0x' + '0'.repeat(64)) {
+        const impl = '0x' + value.slice(-40);
+        if (impl !== ZERO_ADDR) {
+          return { name: 'SELF_SLOT', impl };
+        }
+      }
+    } catch (e) {}
+    return null;
+  })();
 
   // Also check implementation() call in parallel
   const implCallCheck = (async () => {
@@ -104,7 +118,7 @@ async function detectProxyImplementation(client, address, bytecode) {
     return null;
   })();
 
-  const results = await Promise.all([...slotChecks, implCallCheck]);
+  const results = await Promise.all([...slotChecks, selfSlotCheck, implCallCheck]);
   const found = results.find(r => r !== null);
 
   if (found) {
@@ -226,7 +240,11 @@ async function fetchSignatures(selectors) {
       return {};
     }
     const data = await response.json();
-    return data.result?.function || {};
+    // Defensive: check data, result, and function all exist
+    if (data && data.result && data.result.function) {
+      return data.result.function;
+    }
+    return {};
   } catch (e) {
     console.log('Signature lookup error:', e);
     return {};
@@ -274,75 +292,90 @@ function getBytecodeFromHTML() {
 }
 
 async function extractFunctions() {
-  const contractAddress = getContractAddress();
-  if (!contractAddress) {
-    console.log('No contract address found');
-    return;
-  }
-
-  // 1. Try HTML first
-  let code = getBytecodeFromHTML();
-  let bytecodeSource = 'html';
-
-  // 2. If HTML fails, fetch via RPC
-  if (!code) {
-    console.log('No bytecode in HTML, fetching via RPC...');
-    try {
-      const client = createClient();
-      code = await client.getCode({ address: contractAddress });
-      if (code && code !== '0x') {
-        bytecodeSource = 'rpc';
-        console.log('Bytecode fetched via RPC');
-      } else {
-        console.log('No bytecode found via RPC');
-        return;
-      }
-    } catch (e) {
-      console.log('RPC fetch failed:', e.message);
+  try {
+    const contractAddress = getContractAddress();
+    if (!contractAddress) {
+      console.log('No contract address found');
+      window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: 'No contract address' }, '*');
       return;
     }
-  } else {
-    console.log('Bytecode found in HTML');
+
+    // 1. Try HTML first
+    let code = getBytecodeFromHTML();
+    let bytecodeSource = 'html';
+
+    // 2. If HTML fails, fetch via RPC
+    if (!code) {
+      console.log('No bytecode in HTML, fetching via RPC...');
+      try {
+        const client = createClient();
+        code = await client.getCode({ address: contractAddress });
+        if (code && code !== '0x') {
+          bytecodeSource = 'rpc';
+          console.log('Bytecode fetched via RPC, length:', code.length);
+        } else {
+          console.log('No bytecode found via RPC');
+          window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: 'No bytecode found' }, '*');
+          return;
+        }
+      } catch (e) {
+        console.log('RPC fetch failed:', e.message);
+        window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: 'RPC failed: ' + e.message }, '*');
+        return;
+      }
+    } else {
+      console.log('Bytecode found in HTML, length:', code.length);
+    }
+
+    // Check if it's actually bytecode
+    if (!code.startsWith('0x')) {
+      console.log('Source code detected, compilation not implemented');
+      window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: 'Source code compilation not implemented' }, '*');
+      return;
+    }
+
+    // 3. Check for proxy and get implementation bytecode
+    const client = createClient();
+    let implInfo = null;
+    let bytecodeToAnalyze = code;
+
+    console.log('Checking for proxy implementation...');
+    implInfo = await getImplementationBytecode(client, contractAddress, code);
+    if (implInfo) {
+      console.log('Proxy detected! Implementation:', implInfo.address);
+      bytecodeToAnalyze = implInfo.bytecode;
+    } else {
+      console.log('Not a proxy or proxy detection failed');
+    }
+
+    // 4. Extract and display functions
+    console.log('Extracting function selectors from bytecode length:', bytecodeToAnalyze.length);
+    const selectors = functionSelectors(bytecodeToAnalyze);
+    console.log('Found', selectors.length, 'selectors');
+
+    const signatures = await fetchSignatures(selectors);
+
+    const selectorsWithDetails = await Promise.all(selectors.map(async (selector) => {
+      const args = functionArguments(bytecodeToAnalyze, selector);
+      const mutability = functionStateMutability(bytecodeToAnalyze, selector);
+      const formattedSelector = selector.startsWith('0x') ? selector : `0x${selector}`;
+      const signatureInfo = signatures[formattedSelector] && signatures[formattedSelector][0]
+        ? signatures[formattedSelector][0].name
+        : 'Unknown';
+      return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
+    }));
+
+    console.log('Selectors:', selectorsWithDetails);
+    window.postMessage({
+      type: 'FUNCTION_SELECTORS_RESULT',
+      selectors: selectorsWithDetails,
+      implementationAddress: implInfo?.address || null,
+      bytecodeSource
+    }, '*');
+  } catch (e) {
+    console.error('extractFunctions error:', e);
+    window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: e.message }, '*');
   }
-
-  // Check if it's actually bytecode
-  if (!code.startsWith('0x')) {
-    console.log('Source code detected, compilation not implemented');
-    return;
-  }
-
-  // 3. Check for proxy and get implementation bytecode
-  const client = createClient();
-  let implInfo = null;
-  let bytecodeToAnalyze = code;
-
-  implInfo = await getImplementationBytecode(client, contractAddress, code);
-  if (implInfo) {
-    console.log('Proxy detected! Implementation:', implInfo.address);
-    bytecodeToAnalyze = implInfo.bytecode;
-  }
-
-  // 4. Extract and display functions
-  const selectors = functionSelectors(bytecodeToAnalyze);
-  const signatures = await fetchSignatures(selectors);
-
-  const selectorsWithDetails = await Promise.all(selectors.map(async (selector) => {
-    const args = functionArguments(bytecodeToAnalyze, selector);
-    const mutability = functionStateMutability(bytecodeToAnalyze, selector);
-    const formattedSelector = selector.startsWith('0x') ? selector : `0x${selector}`;
-    const signatureInfo = signatures[formattedSelector] && signatures[formattedSelector][0]
-      ? signatures[formattedSelector][0].name
-      : 'Unknown';
-    return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
-  }));
-
-  console.log('Selectors:', selectorsWithDetails);
-  window.postMessage({
-    type: 'FUNCTION_SELECTORS_RESULT',
-    selectors: selectorsWithDetails,
-    implementationAddress: implInfo?.address || null,
-    bytecodeSource
-  }, '*');
 }
 
 // Run the function

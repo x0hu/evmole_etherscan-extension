@@ -205,7 +205,8 @@ function injectScript(file, node) {
             });
           }
         } else if (panel && panel.parentNode) {
-          panel.innerHTML = '<div>No function selectors found or source code compilation not implemented.</div>';
+          const errorMsg = event.data.error || 'No function selectors found';
+          panel.innerHTML = `<div class="error-notice">${errorMsg}</div>`;
         }
       }
 
