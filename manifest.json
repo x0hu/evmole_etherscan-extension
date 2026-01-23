@@ -16,6 +16,7 @@
         "https://basescan.org/tx*",
         "https://basescan.org/txs*",
         "https://blastscan.io/address/*",
+        "https://blastscan.io/token/*",
         "https://blastscan.io/tx*",
         "https://blastscan.io/txs*",
         "https://bscscan.com/address/*",
@@ -31,6 +32,7 @@
         "https://snowtrace.io/tx*",
         "https://snowtrace.io/txs*",
         "https://snowscan.xyz/address/*",
+        "https://snowscan.xyz/token/*",
         "https://snowscan.xyz/tx*",
         "https://snowscan.xyz/txs*",
         "https://uniscan.xyz/address/*",
@@ -92,7 +94,15 @@
         "https://monadscan.com/address/*",
         "https://monadscan.com/token/*", 
         "https://monadscan.com/tx*",
-        "https://monadscan.com/txs*"
+        "https://monadscan.com/txs*",
+        "https://sepolia.etherscan.io/address/*",
+        "https://sepolia.etherscan.io/token/*",
+        "https://sepolia.etherscan.io/tx*",
+        "https://sepolia.etherscan.io/txs*",
+        "https://sepolia.basescan.org/address/*",
+        "https://sepolia.basescan.org/token/*",
+        "https://sepolia.basescan.org/tx*",
+        "https://sepolia.basescan.org/txs*"
       ],
       "js": ["content.js", "etherscan_contract_info.js", "qol_buttons.js"]
     }
@@ -103,7 +113,7 @@
       "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://blastscan.io/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://snowscan.xyz/*",
       "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
       "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*", "https://berascan.com/*", "https://apescan.io/*", "https://mantlescan.xyz/*",
-      "https://monadscan.com/*"]
+      "https://monadscan.com/*", "https://sepolia.etherscan.io/*", "https://sepolia.basescan.org/*"]
     }
   ]
 }

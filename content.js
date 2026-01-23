@@ -61,7 +61,7 @@ function injectScript(file, node) {
   }
 
   function getContractAddress() {
-    const match = window.location.pathname.match(/\/address\/(0x[a-fA-F0-9]{40})/);
+    const match = window.location.pathname.match(/\/(?:address|token)\/(0x[a-fA-F0-9]{40})/);
     return match ? match[1] : null;
   }
 
@@ -122,6 +122,8 @@ function injectScript(file, node) {
                                 functionName !== 'Unknown';
             const queryableClass = isNoArgRead ? 'queryable' : '';
 
+            const queryIndicator = isNoArgRead ? '<span class="queryable-indicator">query</span>' : '';
+
             const itemHtml = `
               <div class="selector-item ${highlightClass} ${queryableClass}"
                    data-selector="${selectorId}"
@@ -133,7 +135,7 @@ function injectScript(file, node) {
                   <span class="mutability">${mutability}</span>
                 </div>
                 <div class="function-info">
-                  <span class="function-name">${functionName}</span>
+                  <span class="function-name">${functionName}</span>${queryIndicator}
                 </div>
                 ${isNoArgRead ? `<div class="query-dropdown" style="display:none;">
                   <button class="query-btn">Query</button>

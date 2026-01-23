@@ -1,5 +1,5 @@
 import { functionSelectors, functionArguments, functionStateMutability } from 'https://cdn.jsdelivr.net/npm/evmole@0.5.1/dist/evmole.mjs';
-import { createPublicClient, http } from 'https://esm.sh/viem@2.21.0';
+import { createPublicClient, http, fallback } from 'https://esm.sh/viem@2.21.0';
 
 // Proxy storage slots
 const PROXY_SLOTS = {
@@ -13,32 +13,43 @@ const PROXY_SLOTS = {
 const MINIMAL_PROXY_REGEX = /^0x363d3d373d3d3d363d73([a-fA-F0-9]{40})5af43d82803e903d91602b57fd5bf3$/;
 
 const CHAIN_CONFIG = {
-  'etherscan.io': { rpc: 'https://eth.llamarpc.com' },
-  'basescan.org': { rpc: 'https://mainnet.base.org' },
-  'arbiscan.io': { rpc: 'https://arb1.arbitrum.io/rpc' },
-  'optimistic.etherscan.io': { rpc: 'https://mainnet.optimism.io' },
-  'polygonscan.com': { rpc: 'https://polygon-rpc.com' },
-  'bscscan.com': { rpc: 'https://bsc-dataseed.binance.org' },
-  'blastscan.io': { rpc: 'https://rpc.blast.io' },
-  'sonicscan.org': { rpc: 'https://rpc.soniclabs.com' },
-  'lineascan.build': { rpc: 'https://rpc.linea.build' },
-  'scrollscan.com': { rpc: 'https://rpc.scroll.io' },
-  'era.zksync.network': { rpc: 'https://mainnet.era.zksync.io' },
-  'berascan.com': { rpc: 'https://rpc.berachain.com' },
-  'mantlescan.xyz': { rpc: 'https://rpc.mantle.xyz' },
-  'snowtrace.io': { rpc: 'https://api.avax.network/ext/bc/C/rpc' },
-  'snowscan.xyz': { rpc: 'https://api.avax.network/ext/bc/C/rpc' },
-  'uniscan.xyz': { rpc: 'https://mainnet.unichain.org' },
-  'worldscan.org': { rpc: 'https://worldchain-mainnet.g.alchemy.com/public' },
-  'apescan.io': { rpc: 'https://rpc.apechain.com/http' },
-  'abscan.org': { rpc: 'https://api.mainnet.abs.xyz' },
-  'monadexplorer.com': { rpc: 'https://testnet-rpc.monad.xyz' },
+  // Testnets (check first - more specific hostnames)
+  'sepolia.etherscan.io': { rpcs: ['https://ethereum-sepolia.gateway.tatum.io', 'https://gateway.tenderly.co/public/sepolia', 'https://ethereum-sepolia-rpc.publicnode.com'] },
+  'sepolia.basescan.org': { rpcs: ['https://base-sepolia.gateway.tenderly.co', 'https://base-sepolia.drpc.org', 'https://base-sepolia-rpc.publicnode.com'] },
+  'testnet.monadscan.com': { rpcs: ['https://testnet-rpc.monad.xyz'] },
+  // Mainnets
+  'etherscan.io': { rpcs: ['https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://rpc.ankr.com/eth'] },
+  'basescan.org': { rpcs: ['https://mainnet.base.org', 'https://base-mainnet.public.blastapi.io', 'https://base-rpc.publicnode.com', 'https://base.lava.build'] },
+  'arbiscan.io': { rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum.drpc.org', 'https://rpc.ankr.com/arbitrum'] },
+  'optimistic.etherscan.io': { rpcs: ['https://mainnet.optimism.io', 'https://optimism.drpc.org', 'https://rpc.ankr.com/optimism'] },
+  'polygonscan.com': { rpcs: ['https://polygon-rpc.com', 'https://polygon.drpc.org', 'https://rpc.ankr.com/polygon'] },
+  'bscscan.com': { rpcs: ['https://bsc-dataseed.binance.org', 'https://bsc.drpc.org', 'https://rpc.ankr.com/bsc'] },
+  'blastscan.io': { rpcs: ['https://rpc.blast.io', 'https://blast.drpc.org'] },
+  'sonicscan.org': { rpcs: ['https://rpc.soniclabs.com'] },
+  'lineascan.build': { rpcs: ['https://rpc.linea.build', 'https://linea.drpc.org'] },
+  'scrollscan.com': { rpcs: ['https://rpc.scroll.io', 'https://scroll.drpc.org'] },
+  'era.zksync.network': { rpcs: ['https://mainnet.era.zksync.io', 'https://zksync.drpc.org'] },
+  'berascan.com': { rpcs: ['https://rpc.berachain.com'] },
+  'mantlescan.xyz': { rpcs: ['https://rpc.mantle.xyz', 'https://mantle.drpc.org'] },
+  'snowtrace.io': { rpcs: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche.drpc.org'] },
+  'snowscan.xyz': { rpcs: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche.drpc.org'] },
+  'uniscan.xyz': { rpcs: ['https://mainnet.unichain.org'] },
+  'worldscan.org': { rpcs: ['https://worldchain-mainnet.g.alchemy.com/public'] },
+  'apescan.io': { rpcs: ['https://rpc.apechain.com/http'] },
+  'abscan.org': { rpcs: ['https://api.mainnet.abs.xyz'] },
+  'monadscan.com': { rpcs: ['https://rpc.monad.xyz'] },
 };
 
 function getChainConfig() {
   const host = window.location.hostname;
+  // Exact match first (for subdomains like sepolia.etherscan.io)
+  if (CHAIN_CONFIG[host]) {
+    return CHAIN_CONFIG[host];
+  }
+  // Partial match fallback
   for (const [domain, config] of Object.entries(CHAIN_CONFIG)) {
-    if (host.includes(domain.replace('.io', '').replace('.org', '').replace('.com', '').replace('.xyz', '').replace('.network', '').replace('.build', ''))) {
+    const stripped = domain.replace(/\.(io|org|com|xyz|network|build)$/, '');
+    if (host.includes(stripped)) {
       return config;
     }
   }
@@ -46,13 +57,16 @@ function getChainConfig() {
 }
 
 function getContractAddress() {
-  const match = window.location.pathname.match(/\/address\/(0x[a-fA-F0-9]{40})/);
+  const match = window.location.pathname.match(/\/(?:address|token)\/(0x[a-fA-F0-9]{40})/);
   return match ? match[1] : null;
 }
 
 function createClient() {
   const config = getChainConfig();
-  return createPublicClient({ transport: http(config.rpc) });
+  const transports = config.rpcs.map(rpc => http(rpc));
+  return createPublicClient({
+    transport: fallback(transports, { rank: true, retryCount: 2 })
+  });
 }
 
 async function detectProxyImplementation(client, address, bytecode) {
@@ -165,52 +179,122 @@ function formatResult(result) {
   return String(result);
 }
 
-function inferOutputType(fnName) {
+function inferOutputTypes(fnName) {
   const name = fnName.toLowerCase();
 
+  // Check if likely returns array (plural names, "all", "list", "get...s")
+  const isLikelyArray = name.endsWith('s') && !['address', 'status', 'decimals', 'gas'].includes(name)
+    || name.startsWith('get') && name.endsWith('s')
+    || name.includes('all') || name.includes('list');
+
   // String returns
-  if (['name', 'symbol', 'version'].includes(name)) return 'string';
-  if (name.endsWith('uri') || name.endsWith('url')) return 'string';
+  if (['name', 'symbol', 'version'].includes(name)) return ['string'];
+  if (name.endsWith('uri') || name.endsWith('url')) return ['string'];
 
   // Address returns
-  if (['owner', 'admin', 'implementation', 'beacon'].includes(name)) return 'address';
-  if (name.includes('address') || name.includes('owner') || name.includes('admin')) return 'address';
+  if (['owner', 'admin', 'implementation', 'beacon'].includes(name)) return ['address'];
+  if (name.includes('address') || name.includes('owner') || name.includes('admin')) {
+    return isLikelyArray ? ['address[]', 'address'] : ['address'];
+  }
 
   // Uint8 returns
-  if (name === 'decimals') return 'uint8';
+  if (name === 'decimals') return ['uint8'];
 
   // Bool returns
-  if (name.startsWith('is') || name.startsWith('has') || name === 'paused') return 'bool';
+  if (name.startsWith('is') || name.startsWith('has') || name === 'paused') return ['bool'];
 
-  // Default to uint256
-  return 'uint256';
+  // Default - try array first if likely, then scalar
+  if (isLikelyArray) {
+    return ['uint256[]', 'address[]', 'uint256'];
+  }
+  return ['uint256'];
 }
 
 async function queryReadFunction(selector, signature, contractAddress) {
-  const config = getChainConfig();
-  const client = createPublicClient({
-    transport: http(config.rpc),
-  });
+  const client = createClient();
 
   const fnName = signature.split('(')[0];
-  const outputType = inferOutputType(fnName);
 
+  // Do raw call first to check response length
   try {
-    const result = await client.readContract({
-      address: contractAddress,
-      abi: [{
-        type: 'function',
-        name: fnName,
-        inputs: [],
-        outputs: [{ type: outputType }],
-        stateMutability: 'view',
-      }],
-      functionName: fnName,
+    const rawResult = await client.call({
+      to: contractAddress,
+      data: selector,
     });
-    return { success: true, result: formatResult(result) };
+
+    if (!rawResult.data || rawResult.data === '0x') {
+      return { success: false, error: 'Empty response' };
+    }
+
+    const dataLen = (rawResult.data.length - 2) / 2; // bytes length
+
+    // Multiple 32-byte chunks = tuple, decode all
+    if (dataLen > 32 && dataLen % 32 === 0) {
+      const decoded = decodeTupleResult(rawResult.data);
+      if (decoded) {
+        return { success: true, result: decoded };
+      }
+    }
+
+    // Single value - try typed decode
+    const outputTypes = inferOutputTypes(fnName);
+    for (const outputType of outputTypes) {
+      try {
+        const result = await client.readContract({
+          address: contractAddress,
+          abi: [{
+            type: 'function',
+            name: fnName,
+            inputs: [],
+            outputs: [{ type: outputType }],
+            stateMutability: 'view',
+          }],
+          functionName: fnName,
+        });
+        return { success: true, result: formatResult(result) };
+      } catch (e) {
+        continue;
+      }
+    }
+
+    // Fallback to raw hex
+    return { success: true, result: rawResult.data };
   } catch (e) {
     return { success: false, error: e.message || 'Query failed' };
   }
+}
+
+function decodeTupleResult(hexData) {
+  // Remove 0x prefix
+  const data = hexData.slice(2);
+  if (data.length === 0 || data.length % 64 !== 0) return null;
+
+  const chunks = [];
+  for (let i = 0; i < data.length; i += 64) {
+    chunks.push(data.slice(i, i + 64));
+  }
+
+  // Decode each 32-byte chunk
+  const results = chunks.map(chunk => {
+    const value = BigInt('0x' + chunk);
+
+    // Check if looks like address:
+    // - First 24 hex chars (12 bytes) are zeros
+    // - Last 40 hex chars (20 bytes) represent address
+    // - Value must be > 2^64 (too big for typical uint) but reasonable address range
+    const isLikelyAddress = chunk.startsWith('000000000000000000000000')
+      && value > BigInt('0xffffffffffffffff')  // bigger than uint64
+      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff'); // within address range
+
+    if (isLikelyAddress) {
+      return '0x' + chunk.slice(24);
+    }
+
+    // Return as decimal number
+    return value.toString();
+  });
+
+  return results.join(', ');
 }
 
 window.addEventListener('message', async (event) => {
