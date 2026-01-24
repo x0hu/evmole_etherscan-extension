@@ -19,7 +19,7 @@ const CHAIN_CONFIG = {
   'testnet.monadscan.com': { rpcs: ['https://testnet-rpc.monad.xyz'] },
   // Mainnets
   'etherscan.io': { rpcs: ['https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://rpc.ankr.com/eth'] },
-  'basescan.org': { rpcs: ['https://mainnet.base.org', 'https://base-mainnet.public.blastapi.io', 'https://base-rpc.publicnode.com', 'https://base.lava.build'] },
+  'basescan.org': { rpcs: ['https://base-mainnet.gateway.tatum.io', 'https://base.drpc.org', 'https://base-rpc.publicnode.com', 'https://base.lava.build'] },
   'arbiscan.io': { rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum.drpc.org', 'https://rpc.ankr.com/arbitrum'] },
   'optimistic.etherscan.io': { rpcs: ['https://mainnet.optimism.io', 'https://optimism.drpc.org', 'https://rpc.ankr.com/optimism'] },
   'polygonscan.com': { rpcs: ['https://polygon-rpc.com', 'https://polygon.drpc.org', 'https://rpc.ankr.com/polygon'] },
@@ -81,8 +81,8 @@ async function detectProxyImplementation(client, address, bytecode) {
   }
 
   // 2. Skip RPC checks if bytecode is very large (definitely not a proxy)
-  // EIP-1967 transparent proxies can be 2000-6000 chars, real contracts are 10000+
-  if (bytecode.length > 15000) {
+  // EIP-1967 transparent proxies can be 2000-6000 chars, real contracts are typically 10000+
+  if (bytecode.length > 10000) {
     console.log('Very large bytecode, skipping proxy RPC checks');
     return null;
   }
@@ -210,6 +210,24 @@ function inferOutputTypes(fnName) {
   return ['uint256'];
 }
 
+function decodeStringResult(hexData) {
+  if (!hexData || !hexData.startsWith('0x') || hexData.length < 130) return null;
+  const data = hexData.slice(2);
+  const offset = BigInt('0x' + data.slice(0, 64));
+  if (offset !== 32n) return null;
+  const len = Number(BigInt('0x' + data.slice(64, 128)));
+  const byteStart = 128;
+  const byteEnd = byteStart + len * 2;
+  if (len <= 0 || byteEnd > data.length) return null;
+  const bytesHex = data.slice(byteStart, byteEnd);
+  const bytes = new Uint8Array(bytesHex.match(/.{2}/g).map(b => parseInt(b, 16)));
+  try {
+    return new TextDecoder().decode(bytes);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function queryReadFunction(selector, signature, contractAddress) {
   const client = createClient();
 
@@ -227,6 +245,11 @@ async function queryReadFunction(selector, signature, contractAddress) {
     }
 
     const dataLen = (rawResult.data.length - 2) / 2; // bytes length
+
+    const stringResult = decodeStringResult(rawResult.data);
+    if (stringResult !== null) {
+      return { success: true, result: stringResult };
+    }
 
     // Multiple 32-byte chunks = tuple, decode all
     if (dataLen > 32 && dataLen % 32 === 0) {
