@@ -11,6 +11,7 @@ const PROXY_SLOTS = {
 
 // EIP-1167 minimal proxy pattern
 const MINIMAL_PROXY_REGEX = /^0x363d3d373d3d3d363d73([a-fA-F0-9]{40})5af43d82803e903d91602b57fd5bf3$/;
+const PROXY_SELECTOR_THRESHOLD = 8;
 
 const CHAIN_CONFIG = {
   // Testnets (check first - more specific hostnames)
@@ -441,23 +442,27 @@ async function extractFunctions() {
       return;
     }
 
-    // 3. Check for proxy and get implementation bytecode
-    const client = createClient();
+    // 3. Fast path: if bytecode already exposes enough selectors, skip proxy RPC checks
     let implInfo = null;
     let bytecodeToAnalyze = code;
-
-    console.log('Checking for proxy implementation...');
-    implInfo = await getImplementationBytecode(client, contractAddress, code);
-    if (implInfo) {
-      console.log('Proxy detected! Implementation:', implInfo.address);
-      bytecodeToAnalyze = implInfo.bytecode;
+    const initialSelectors = functionSelectors(code);
+    if (initialSelectors.length >= PROXY_SELECTOR_THRESHOLD) {
+      console.log('Skipping proxy detection (selector count >= threshold):', initialSelectors.length);
     } else {
-      console.log('Not a proxy or proxy detection failed');
+      const client = createClient();
+      console.log('Checking for proxy implementation...');
+      implInfo = await getImplementationBytecode(client, contractAddress, code);
+      if (implInfo) {
+        console.log('Proxy detected! Implementation:', implInfo.address);
+        bytecodeToAnalyze = implInfo.bytecode;
+      } else {
+        console.log('Not a proxy or proxy detection failed');
+      }
     }
 
     // 4. Extract and display functions
     console.log('Extracting function selectors from bytecode length:', bytecodeToAnalyze.length);
-    const selectors = functionSelectors(bytecodeToAnalyze);
+    const selectors = bytecodeToAnalyze === code ? initialSelectors : functionSelectors(bytecodeToAnalyze);
     console.log('Found', selectors.length, 'selectors');
 
     const signatures = await fetchSignatures(selectors);
