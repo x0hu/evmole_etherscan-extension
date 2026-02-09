@@ -102,7 +102,15 @@
         "https://sepolia.basescan.org/address/*",
         "https://sepolia.basescan.org/token/*",
         "https://sepolia.basescan.org/tx*",
-        "https://sepolia.basescan.org/txs*"
+        "https://sepolia.basescan.org/txs*",
+        "https://sepolia.etherscan.io/address/*",
+        "https://sepolia.etherscan.io/token/*",
+        "https://sepolia.etherscan.io/tx*",
+        "https://sepolia.etherscan.io/txs*",
+        "https://mega.etherscan.io/address/*",
+        "https://mega.etherscan.io/token/*",
+        "https://mega.etherscan.io/tx/*",
+        "https://mega.etherscan.io/txs*"
       ],
       "js": ["content.js", "etherscan_contract_info.js", "qol_buttons.js"]
     }
@@ -113,7 +121,7 @@
       "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://blastscan.io/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://snowscan.xyz/*",
       "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
       "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*", "https://berascan.com/*", "https://apescan.io/*", "https://mantlescan.xyz/*",
-      "https://monadscan.com/*", "https://sepolia.etherscan.io/*", "https://sepolia.basescan.org/*"]
+      "https://monadscan.com/*", "https://sepolia.etherscan.io/*", "https://sepolia.basescan.org/*", "https://sepolia.etherscan.io/*", "https://mega.etherscan.io/*"]
     }
   ]
 }
