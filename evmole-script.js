@@ -256,7 +256,7 @@ async function queryReadFunction(selector, signature, contractAddress) {
     if (dataLen > 32 && dataLen % 32 === 0) {
       const decoded = decodeTupleResult(rawResult.data);
       if (decoded) {
-        return { success: true, result: decoded };
+        return { success: true, result: decoded.formatted, rawChunks: decoded.chunks };
       }
     }
 
@@ -298,27 +298,98 @@ function decodeTupleResult(hexData) {
     chunks.push(data.slice(i, i + 64));
   }
 
-  // Decode each 32-byte chunk
+  // Decode each 32-byte chunk as decimal (default)
   const results = chunks.map(chunk => {
     const value = BigInt('0x' + chunk);
 
-    // Check if looks like address:
-    // - First 24 hex chars (12 bytes) are zeros
-    // - Last 40 hex chars (20 bytes) represent address
-    // - Value must be > 2^64 (too big for typical uint) but reasonable address range
     const isLikelyAddress = chunk.startsWith('000000000000000000000000')
-      && value > BigInt('0xffffffffffffffff')  // bigger than uint64
-      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff'); // within address range
+      && value > BigInt('0xffffffffffffffff')
+      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff');
 
     if (isLikelyAddress) {
       return '0x' + chunk.slice(24);
     }
 
-    // Return as decimal number
     return value.toString();
   });
 
-  return results.join(', ');
+  return { formatted: results.join(', '), chunks };
+}
+
+function formatTupleChunks(chunks, mode) {
+  if (mode === 'hex') {
+    return chunks.map(c => '0x' + c).join(', ');
+  }
+  if (mode === 'auto') {
+    return autoDecodeTuple(chunks);
+  }
+  // dec (default)
+  return chunks.map(chunk => {
+    const value = BigInt('0x' + chunk);
+    const isLikelyAddress = chunk.startsWith('000000000000000000000000')
+      && value > BigInt('0xffffffffffffffff')
+      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff');
+    if (isLikelyAddress) return '0x' + chunk.slice(24);
+    return value.toString();
+  }).join(', ');
+}
+
+function autoDecodeTuple(chunks) {
+  const totalBytes = chunks.length * 32;
+  const consumed = new Set(); // chunk indices that are part of string length+data
+  const offsetMap = new Map(); // chunk index → decoded string
+
+  // Pass 1: find offsets pointing to ABI-encoded strings
+  for (let i = 0; i < chunks.length; i++) {
+    const val = Number(BigInt('0x' + chunks[i]));
+    if (val === 0 || val % 32 !== 0 || val >= totalBytes) continue;
+    const target = val / 32;
+    if (target <= i || target >= chunks.length) continue;
+    // target chunk = string length
+    const strLen = Number(BigInt('0x' + chunks[target]));
+    if (strLen <= 0 || strLen > totalBytes) continue;
+    const dataChunks = Math.ceil(strLen / 32);
+    if (target + dataChunks >= chunks.length) continue;
+    // try decoding as UTF-8
+    const hex = chunks.slice(target + 1, target + 1 + dataChunks).join('').slice(0, strLen * 2);
+    if (hex.length < strLen * 2) continue;
+    const bytes = new Uint8Array(hex.match(/.{2}/g).map(b => parseInt(b, 16)));
+    try {
+      const str = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      if (!/^[\x20-\x7e\n\r\t]+$/.test(str)) continue; // not printable ASCII
+      offsetMap.set(i, str);
+      consumed.add(target);
+      for (let j = target + 1; j <= target + dataChunks; j++) consumed.add(j);
+    } catch (e) { /* not valid UTF-8 */ }
+  }
+
+  // Pass 2: build structured entries
+  const entries = [];
+  let idx = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    if (consumed.has(i)) continue;
+    if (offsetMap.has(i)) {
+      entries.push({ idx: idx++, type: 'str', value: offsetMap.get(i) });
+      continue;
+    }
+    const chunk = chunks[i];
+    const value = BigInt('0x' + chunk);
+    if (chunk === '0'.repeat(63) + '0' || chunk === '0'.repeat(63) + '1') {
+      entries.push({ idx: idx++, type: 'bool', value: value === 0n ? 'false' : 'true' });
+      continue;
+    }
+    if (chunk.startsWith('000000000000000000000000') && value > BigInt('0xffffffffffffffff')) {
+      entries.push({ idx: idx++, type: 'addr', value: '0x' + chunk.slice(24) });
+      continue;
+    }
+    const usedBytes = Math.ceil(chunk.replace(/^0+/, '').length / 2);
+    if (usedBytes <= 8) {
+      entries.push({ idx: idx++, type: 'uint', value: value.toString() });
+    } else {
+      entries.push({ idx: idx++, type: 'bytes', value: '0x' + chunk });
+    }
+  }
+  return entries;
 }
 
 window.addEventListener('message', async (event) => {
@@ -329,6 +400,16 @@ window.addEventListener('message', async (event) => {
       type: 'QUERY_RESULT',
       selector,
       ...result
+    }, '*');
+  }
+  if (event.data?.type === 'FORMAT_TUPLE') {
+    const { selector, chunks, mode } = event.data;
+    const formatted = formatTupleChunks(chunks, mode);
+    window.postMessage({
+      type: 'FORMAT_TUPLE_RESULT',
+      selector,
+      mode,
+      formatted
     }, '*');
   }
 });

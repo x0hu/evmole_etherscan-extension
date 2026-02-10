@@ -1,4 +1,8 @@
-function injectScript(file, node) {
+function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function injectScript(file, node) {
     const script = document.createElement('script');
     script.setAttribute('type', 'module');
     script.setAttribute('src', chrome.runtime.getURL(file));
@@ -6,49 +10,54 @@ function injectScript(file, node) {
   }
   
   function createRightPanel(content) {
+    // Container: fixed on right edge, holds panel + tab
+    const container = document.createElement('div');
+    container.className = 'evmole-container';
+
+    // Panel (top)
     const panel = document.createElement('div');
-    panel.style.position = 'fixed';
-    panel.style.right = '20px';
-    panel.style.top = '50%';
-    panel.style.transform = 'translateY(-50%)';
-    panel.style.width = '400px';
-    panel.style.padding = '15px';
-    panel.style.backgroundColor = 'rgba(28, 30, 33, 0.4)';
-    panel.style.border = '1px solid #2d2f31';
-    panel.style.borderRadius = '5px';
-    panel.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
-    panel.style.zIndex = '1000';
-    panel.style.maxHeight = '80vh';
-    panel.style.overflowY = 'auto';
-    panel.style.color = '#e4e6eb';
-    panel.style.fontFamily = 'Monospace, monospace';
-  
+    panel.className = 'evmole-panel collapsed';
+
     const title = document.createElement('h3');
     title.textContent = 'Contract Functions';
     title.style.marginBottom = '10px';
     title.style.color = '#e4e6eb';
     panel.appendChild(title);
-  
+
     const contentDiv = document.createElement('div');
     contentDiv.innerHTML = content;
     panel.appendChild(contentDiv);
-  
+
     const closeButton = document.createElement('button');
     closeButton.innerHTML = '&times;';
-    closeButton.style.position = 'absolute';
-    closeButton.style.right = '10px';
-    closeButton.style.top = '10px';
-    closeButton.style.border = 'none';
-    closeButton.style.background = 'none';
-    closeButton.style.fontSize = '18px';
-    closeButton.style.cursor = 'pointer';
-    closeButton.style.color = '#e4e6eb';
+    closeButton.className = 'evmole-close-btn';
     closeButton.onclick = function() {
-      document.body.removeChild(panel);
+      document.body.removeChild(container);
     };
     panel.appendChild(closeButton);
-  
-    document.body.appendChild(panel);
+
+    container.appendChild(panel);
+
+    // Bottom tab toggle
+    const tab = document.createElement('div');
+    tab.className = 'evmole-tab';
+    tab.textContent = '\u25C0 Contract Functions';
+    tab.addEventListener('click', () => {
+      const collapsed = panel.classList.toggle('collapsed');
+      tab.textContent = collapsed ? '\u25C0 Contract Functions' : 'Contract Functions \u25B6';
+      // Strip/restore args in function names
+      panel.querySelectorAll('.function-name').forEach(el => {
+        if (collapsed) {
+          if (!el.dataset.full) el.dataset.full = el.textContent;
+          el.textContent = el.dataset.full.replace(/\(.*\)/, '()');
+        } else if (el.dataset.full) {
+          el.textContent = el.dataset.full;
+        }
+      });
+    });
+    container.appendChild(tab);
+
+    document.body.appendChild(container);
     return contentDiv;
   }
   
@@ -205,6 +214,13 @@ function injectScript(file, node) {
                 });
               }
             });
+            // If starting collapsed, strip args from function names
+            if (panel.parentNode && panel.parentNode.querySelector('.evmole-panel.collapsed')) {
+              panel.querySelectorAll('.function-name').forEach(el => {
+                el.dataset.full = el.textContent;
+                el.textContent = el.textContent.replace(/\(.*\)/, '()');
+              });
+            }
           }
         } else if (panel && panel.parentNode) {
           const errorMsg = event.data.error || 'No function selectors found';
@@ -214,18 +230,26 @@ function injectScript(file, node) {
 
       // Handle query results
       if (event.data && event.data.type === 'QUERY_RESULT') {
-        const { selector, success, result, error } = event.data;
+        const { selector, success, result, error, rawChunks } = event.data;
         const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
         if (item) {
           const resultDiv = item.querySelector('.query-result');
           if (success) {
             resultDiv.className = 'query-result success';
             const copyId = 'copyIcon_' + selector.replace('0x', '');
-            const isNumeric = !result.startsWith('0x') && /^\d+$/.test(result);
+            const isTuple = rawChunks && rawChunks.length > 0;
+            const isNumeric = !isTuple && !result.startsWith('0x') && /^\d+$/.test(result);
 
-            let unitDropdown = '';
-            if (isNumeric) {
-              unitDropdown = `
+            let controls = '';
+            if (isTuple) {
+              controls = `
+                <div class="format-toggle">
+                  <a href="javascript:;" data-mode="dec" class="fmt-option active">Dec</a>
+                  <a href="javascript:;" data-mode="hex" class="fmt-option">Hex</a>
+                  <a href="javascript:;" data-mode="auto" class="fmt-option">Auto</a>
+                </div>`;
+            } else if (isNumeric) {
+              controls = `
                 <div class="unit-dropdown">
                   <a class="link-secondary unit-toggle" href="javascript:;" title="Convert units"><i class="fas fa-exchange-alt fa-fw"></i></a>
                   <div class="unit-menu">
@@ -237,7 +261,26 @@ function injectScript(file, node) {
                 </div>`;
             }
 
-            resultDiv.innerHTML = `<span class="result-value">${result}</span>${unitDropdown}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
+            resultDiv.innerHTML = `<span class="result-value">${result}</span>${controls}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
+
+            // Tuple format toggle
+            if (isTuple) {
+              const valueSpan = resultDiv.querySelector('.result-value');
+              resultDiv.querySelectorAll('.fmt-option').forEach(opt => {
+                opt.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  resultDiv.querySelectorAll('.fmt-option').forEach(o => o.classList.remove('active'));
+                  opt.classList.add('active');
+                  window.postMessage({
+                    type: 'FORMAT_TUPLE',
+                    selector,
+                    chunks: rawChunks,
+                    mode: opt.dataset.mode
+                  }, '*');
+                });
+              });
+            }
 
             // Unit conversion
             if (isNumeric) {
@@ -288,6 +331,44 @@ function injectScript(file, node) {
           }
         }
       }
+
+      // Handle tuple format toggle results
+      if (event.data && event.data.type === 'FORMAT_TUPLE_RESULT') {
+        const { selector, formatted, mode } = event.data;
+        const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
+        if (item) {
+          const resultDiv = item.querySelector('.query-result');
+          const valueSpan = item.querySelector('.result-value');
+          const clipboardBtn = item.querySelector('.js-clipboard');
+
+          if (mode === 'auto' && Array.isArray(formatted)) {
+            resultDiv.classList.add('auto-mode');
+            const TRUNC = 60;
+            const html = formatted.map(e => {
+              const escaped = escapeHtml(e.value);
+              const isTrunc = e.type === 'str' && e.value.length > TRUNC;
+              const val = isTrunc
+                ? `<span class="tuple-val truncated" data-full="${escaped}">${escapeHtml(e.value.slice(0, TRUNC))}…</span>`
+                : `<span class="tuple-val">${escaped}</span>`;
+              return `<div class="tuple-entry"><span class="tuple-idx">[${e.idx}]</span><span class="tuple-type type-${e.type}">${e.type}</span>${val}</div>`;
+            }).join('');
+            valueSpan.innerHTML = html;
+            valueSpan.querySelectorAll('.truncated').forEach(el => {
+              el.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                el.textContent = el.dataset.full;
+                el.classList.remove('truncated');
+              });
+            });
+            const plain = formatted.map(e => `[${e.idx}] ${e.type}: ${e.value}`).join('\n');
+            if (clipboardBtn) clipboardBtn.dataset.clipboardText = plain;
+          } else {
+            resultDiv.classList.remove('auto-mode');
+            if (valueSpan) valueSpan.textContent = formatted;
+            if (clipboardBtn) clipboardBtn.dataset.clipboardText = formatted;
+          }
+        }
+      }
     };
 
     window.addEventListener('message', messageHandler);
@@ -298,7 +379,7 @@ function injectScript(file, node) {
     };
 
     // Add cleanup to the close button
-    const closeButton = panel.querySelector('button');
+    const closeButton = panel.parentNode && panel.parentNode.querySelector('.evmole-close-btn');
     if (closeButton) {
       const originalOnClick = closeButton.onclick;
       closeButton.onclick = function() {

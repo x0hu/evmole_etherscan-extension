@@ -1,3 +1,115 @@
+/* Container: fixed top-right */
+.evmole-container {
+  position: fixed;
+  right: 0;
+  top: 120px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+/* Top tab toggle */
+.evmole-tab {
+  background: rgba(28, 30, 33, 0.95);
+  border: 1px solid #2d2f31;
+  border-radius: 5px 0 0 5px;
+  padding: 6px 12px;
+  color: #e4e6eb;
+  font-family: Monospace, monospace;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.evmole-tab:hover {
+  background: rgba(45, 47, 49, 0.95);
+}
+
+/* Panel */
+.evmole-panel {
+  position: relative;
+  width: 400px;
+  padding: 15px;
+  background-color: rgba(28, 30, 33, 0.4);
+  border: 1px solid #2d2f31;
+  border-radius: 5px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  max-height: 80vh;
+  overflow-y: auto;
+  color: #e4e6eb;
+  font-family: Monospace, monospace;
+  transition: width 0.3s ease, padding 0.3s ease;
+}
+
+.evmole-panel.collapsed {
+  width: 200px;
+  padding: 8px;
+}
+
+/* Hide extras in collapsed */
+.evmole-panel.collapsed h3,
+.evmole-panel.collapsed .evmole-close-btn,
+.evmole-panel.collapsed .arguments,
+.evmole-panel.collapsed .mutability,
+.evmole-panel.collapsed .queryable-indicator,
+.evmole-panel.collapsed .query-dropdown,
+.evmole-panel.collapsed .section-divider,
+.evmole-panel.collapsed .impl-notice {
+  display: none !important;
+}
+
+/* Compact section headers in collapsed */
+.evmole-panel.collapsed .section-header {
+  font-size: 10px;
+  margin: 4px 0 2px 0;
+  padding-bottom: 2px;
+}
+
+.evmole-panel.collapsed .selector-item {
+  margin-bottom: 2px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(45, 47, 49, 0.5);
+  cursor: default;
+  background: none !important;
+  border-left: none !important;
+}
+
+.evmole-panel.collapsed .selector-item:hover {
+  background: none !important;
+}
+
+.evmole-panel.collapsed .selector-info {
+  margin-bottom: 0;
+}
+
+.evmole-panel.collapsed .function-info {
+  margin-bottom: 0;
+  margin-left: 0;
+}
+
+.evmole-panel.collapsed .selector-id {
+  font-size: 11px;
+}
+
+.evmole-panel.collapsed .function-name {
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+/* Close button */
+.evmole-close-btn {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  border: none;
+  background: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: #e4e6eb;
+}
+
 .selector-item {
   margin-bottom: 8px;
   border-bottom: 1px solid #2d2f31;
@@ -252,6 +364,97 @@
 .impl-link:hover {
   color: #a569bd;
   text-decoration: underline;
+}
+
+/* Format toggle for tuple results */
+.format-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: 4px;
+  border: 1px solid #2d2f31;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.fmt-option {
+  padding: 1px 6px;
+  color: #95a5a6;
+  text-decoration: none;
+  font-size: 10px;
+  font-family: system-ui, sans-serif;
+  border-right: 1px solid #2d2f31;
+  cursor: pointer;
+}
+
+.fmt-option:last-child {
+  border-right: none;
+}
+
+.fmt-option:hover {
+  background: rgba(52, 152, 219, 0.2);
+  color: #3498db;
+}
+
+.fmt-option.active {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+}
+
+/* Auto mode layout — entries below, controls on top */
+.query-result.auto-mode {
+  flex-wrap: wrap;
+}
+
+.query-result.auto-mode .result-value {
+  flex-basis: 100%;
+  order: 1;
+  margin-top: 6px;
+}
+
+.tuple-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.tuple-entry:last-child {
+  border-bottom: none;
+}
+
+.tuple-idx {
+  color: #636e72;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.tuple-type {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  font-family: system-ui, sans-serif;
+}
+
+.type-addr { background: rgba(155, 89, 182, 0.25); color: #9b59b6; }
+.type-str  { background: rgba(46, 204, 113, 0.25); color: #2ecc71; }
+.type-uint { background: rgba(52, 152, 219, 0.25); color: #3498db; }
+.type-bool { background: rgba(241, 196, 15, 0.25); color: #f1c40f; }
+.type-bytes { background: rgba(149, 165, 166, 0.25); color: #95a5a6; }
+
+.tuple-val {
+  word-break: break-all;
+  font-size: 11px;
+}
+
+.tuple-val.truncated {
+  cursor: pointer;
+  border-bottom: 1px dashed currentColor;
+}
+
+.tuple-val.truncated:hover {
+  opacity: 0.8;
 }
 
 /* Error notice */
