@@ -113,6 +113,38 @@
         "https://mega.etherscan.io/txs*"
       ],
       "js": ["content.js", "etherscan_contract_info.js", "qol_buttons.js"]
+    },
+    {
+      "matches": [
+        "https://etherscan.io/tx/*",
+        "https://basescan.org/tx/*",
+        "https://blastscan.io/tx/*",
+        "https://bscscan.com/tx/*",
+        "https://arbiscan.io/tx/*",
+        "https://snowtrace.io/tx/*",
+        "https://snowscan.xyz/tx/*",
+        "https://uniscan.xyz/tx/*",
+        "https://sonicscan.org/tx/*",
+        "https://hyperevmscan.io/tx/*",
+        "https://polygonscan.com/tx/*",
+        "https://optimistic.etherscan.io/tx/*",
+        "https://lineascan.build/tx/*",
+        "https://worldscan.org/tx/*",
+        "https://abscan.org/tx/*",
+        "https://era.zksync.network/tx/*",
+        "https://scrollscan.com/tx/*",
+        "https://berascan.com/tx/*",
+        "https://apescan.io/tx/*",
+        "https://mantlescan.xyz/tx/*",
+        "https://monadscan.com/tx/*",
+        "https://testnet.monadscan.com/tx/*",
+        "https://fraxscan.com/tx/*",
+        "https://taikoscan.io/tx/*",
+        "https://sepolia.etherscan.io/tx/*",
+        "https://sepolia.basescan.org/tx/*",
+        "https://mega.etherscan.io/tx/*"
+      ],
+      "js": ["decode_calldata.js"]
     }
   ],
   "web_accessible_resources": [
