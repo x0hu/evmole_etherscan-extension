@@ -257,6 +257,7 @@ function escapeHtml(str) {
                     <a href="javascript:;" data-unit="1e6" class="unit-option">/ 10⁶</a>
                     <a href="javascript:;" data-unit="1e9" class="unit-option">Gwei</a>
                     <a href="javascript:;" data-unit="1e18" class="unit-option">Ether</a>
+                    <a href="javascript:;" data-unit="addr" class="unit-option">Address</a>
                   </div>
                 </div>`;
             }
@@ -302,8 +303,15 @@ function escapeHtml(str) {
                   e.preventDefault();
                   dropdown.querySelectorAll('.unit-option').forEach(o => o.classList.remove('active'));
                   opt.classList.add('active');
-                  const divisor = BigInt(parseFloat(opt.dataset.unit));
-                  const converted = divisor === 1n ? rawValue.toString() : (Number(rawValue) / Number(divisor)).toString();
+                  const unit = opt.dataset.unit;
+                  let converted;
+                  if (unit === 'addr') {
+                    const mask160 = (1n << 160n) - 1n;
+                    converted = '0x' + (rawValue & mask160).toString(16).padStart(40, '0');
+                  } else {
+                    const divisor = BigInt(parseFloat(unit));
+                    converted = divisor === 1n ? rawValue.toString() : (Number(rawValue) / Number(divisor)).toString();
+                  }
                   valueSpan.textContent = converted;
                   resultDiv.querySelector('.js-clipboard').dataset.clipboardText = converted;
                   menu.classList.remove('show');

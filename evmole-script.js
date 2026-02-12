@@ -41,6 +41,9 @@ const CHAIN_CONFIG = {
   'monadscan.com': { rpcs: ['https://rpc.monad.xyz'] },
 };
 
+const QUERY_HEDGE_STAGGER_MS = 180;
+const QUERY_HEDGE_MAX_RPCS = 3;
+
 function getChainConfig() {
   const host = window.location.hostname;
   // Exact match first (for subdomains like sepolia.etherscan.io)
@@ -68,6 +71,90 @@ function createClient() {
   return createPublicClient({
     transport: fallback(transports, { rank: true, retryCount: 2 })
   });
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function formatRpcError(error) {
+  if (!error) return 'Unknown RPC error';
+  if (typeof error === 'string') return error;
+  if (error.name === 'AbortError') return 'Request aborted';
+  return error.message || String(error);
+}
+
+async function rawEthCall(rpc, to, data, signal) {
+  const response = await fetch(rpc, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      method: 'eth_call',
+      params: [{ to, data }, 'latest']
+    }),
+    signal
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (payload?.error) {
+    throw new Error(payload.error.message || 'JSON-RPC error');
+  }
+
+  const result = payload?.result;
+  if (typeof result !== 'string' || !result.startsWith('0x')) {
+    throw new Error('Invalid eth_call result');
+  }
+
+  return result;
+}
+
+async function hedgedReadCall(contractAddress, selector) {
+  const rpcs = getChainConfig().rpcs.slice(0, QUERY_HEDGE_MAX_RPCS);
+  if (rpcs.length === 0) {
+    throw new Error('No RPC endpoints configured');
+  }
+
+  let settled = false;
+  const controllers = [];
+
+  try {
+    const attempts = rpcs.map((rpc, index) => (async () => {
+      if (index > 0) {
+        await delay(QUERY_HEDGE_STAGGER_MS * index);
+      }
+
+      if (settled) {
+        throw new Error('Cancelled');
+      }
+
+      const controller = new AbortController();
+      controllers.push(controller);
+
+      const data = await rawEthCall(rpc, contractAddress, selector, controller.signal);
+      return { data, rpc };
+    })());
+
+    const winner = await Promise.any(attempts);
+    settled = true;
+
+    // Abort in-flight slower requests once the first valid result wins.
+    controllers.forEach(controller => controller.abort());
+    return winner;
+  } catch (e) {
+    const details = e instanceof AggregateError
+      ? e.errors.map(formatRpcError).join('; ')
+      : formatRpcError(e);
+    throw new Error(`All RPCs failed: ${details}`);
+  } finally {
+    settled = true;
+    controllers.forEach(controller => controller.abort());
+  }
 }
 
 async function detectProxyImplementation(client, address, bytecode) {
@@ -159,56 +246,38 @@ async function getImplementationBytecode(client, address, proxyBytecode) {
   return null;
 }
 
-function formatResult(result) {
-  if (typeof result === 'bigint') {
-    const hex = result.toString(16);
-    // Only treat as address if hex is 38-40 chars (actual address-sized value)
-    if (hex.length >= 38 && hex.length <= 40) {
-      return '0x' + hex.padStart(40, '0');
-    }
-    return result.toString();
-  }
-  if (typeof result === 'string' && result.startsWith('0x')) {
-    return result;
-  }
-  if (Array.isArray(result)) {
-    return result.map(formatResult).join(', ');
-  }
-  if (typeof result === 'object' && result !== null) {
-    return JSON.stringify(result, (k, v) => typeof v === 'bigint' ? v.toString() : v);
-  }
-  return String(result);
-}
+function decodeSingleWordResult(hexData, fnName) {
+  const chunk = hexData.slice(2);
+  if (chunk.length !== 64) return hexData;
 
-function inferOutputTypes(fnName) {
   const name = fnName.toLowerCase();
-
-  // Check if likely returns array (plural names, "all", "list", "get...s")
-  const isLikelyArray = name.endsWith('s') && !['address', 'status', 'decimals', 'gas'].includes(name)
-    || name.startsWith('get') && name.endsWith('s')
-    || name.includes('all') || name.includes('list');
-
-  // String returns
-  if (['name', 'symbol', 'version'].includes(name)) return ['string'];
-  if (name.endsWith('uri') || name.endsWith('url')) return ['string'];
-
-  // Address returns
-  if (['owner', 'admin', 'implementation', 'beacon'].includes(name)) return ['address'];
-  if (name.includes('address') || name.includes('owner') || name.includes('admin')) {
-    return isLikelyArray ? ['address[]', 'address'] : ['address'];
+  const value = BigInt('0x' + chunk);
+  const isBoolHint = name.startsWith('is') || name.startsWith('has') || name === 'paused';
+  if (isBoolHint) {
+    return value === 0n ? 'false' : 'true';
   }
 
-  // Uint8 returns
-  if (name === 'decimals') return ['uint8'];
-
-  // Bool returns
-  if (name.startsWith('is') || name.startsWith('has') || name === 'paused') return ['bool'];
-
-  // Default - try array first if likely, then scalar
-  if (isLikelyArray) {
-    return ['uint256[]', 'address[]', 'uint256'];
+  // ABI-encoded address is left-padded to 32 bytes (12 leading zero bytes).
+  const isAddressShaped = chunk.startsWith('0'.repeat(24)) && value !== 0n;
+  const strongAddressNameHint = ['owner', 'admin', 'implementation', 'beacon'].includes(name)
+    || name.includes('address')
+    || name.includes('owner')
+    || name.includes('admin')
+    || name.includes('manager')
+    || name.includes('factory')
+    || name.includes('router')
+    || name.includes('vault')
+    || name.includes('treasury')
+    || name.includes('governor')
+    || name.includes('operator')
+    || name.includes('controller')
+    || name.includes('recipient')
+    || name.includes('receiver');
+  if (isAddressShaped && strongAddressNameHint) {
+    return '0x' + chunk.slice(24);
   }
-  return ['uint256'];
+
+  return value.toString();
 }
 
 function decodeStringResult(hexData) {
@@ -230,16 +299,11 @@ function decodeStringResult(hexData) {
 }
 
 async function queryReadFunction(selector, signature, contractAddress) {
-  const client = createClient();
-
   const fnName = signature.split('(')[0];
 
   // Do raw call first to check response length
   try {
-    const rawResult = await client.call({
-      to: contractAddress,
-      data: selector,
-    });
+    const rawResult = await hedgedReadCall(contractAddress, selector);
 
     if (!rawResult.data || rawResult.data === '0x') {
       return { success: false, error: 'Empty response' };
@@ -260,25 +324,8 @@ async function queryReadFunction(selector, signature, contractAddress) {
       }
     }
 
-    // Single value - try typed decode
-    const outputTypes = inferOutputTypes(fnName);
-    for (const outputType of outputTypes) {
-      try {
-        const result = await client.readContract({
-          address: contractAddress,
-          abi: [{
-            type: 'function',
-            name: fnName,
-            inputs: [],
-            outputs: [{ type: outputType }],
-            stateMutability: 'view',
-          }],
-          functionName: fnName,
-        });
-        return { success: true, result: formatResult(result) };
-      } catch (e) {
-        continue;
-      }
+    if (dataLen === 32) {
+      return { success: true, result: decodeSingleWordResult(rawResult.data, fnName) };
     }
 
     // Fallback to raw hex
