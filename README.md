@@ -1,39 +1,36 @@
 # Evmole for Etherscan QOL
 
-Chrome extension that adds function selectors and small QOL improvements to EVM block explorers.
+Chrome extension for Etherscan-style explorers that adds contract-analysis and transaction-page quality-of-life tooling.
 
-## Features
+## What It Adds
 
-- Function selector panel on contract pages (ignores standard ERC20 selectors)
-- Quick buttons: "Incoming" and "CA Create" on transaction lists
-- Auto-sets lists to 100 records per page
-- Works across major EVM explorers
+- Contract function selector panel on `address/*` and `token/*` pages
+- Transaction input calldata decoding on `tx/*` pages
+- List-page QOL actions like quick "Incoming" / "CA Create" filters
+- Auto-sets transaction list page size to 100 when supported
 
-Supported explorers: Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, Snowtrace/Snowscan, Polygonscan, Optimistic Etherscan, Lineascan, Worldscan, Abscan, Era.zksync, Scrollscan, and more.
+Supported explorers include Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, Snowtrace/Snowscan, Polygonscan, Optimistic Etherscan, Lineascan, Worldscan, Scrollscan, and other Etherscan-family scanners configured in `manifest.json`.
 
-## Screenshots
+## Screenshot
 
 ![Function Selector Panel](screenshot1.png)
-![QOL Buttons](screenshot2.png)
+![Transaction Input Decode View](txcalldataDecoded.png)
 
 ## Install
 
-1. Clone this repo
-2. Open `chrome://extensions/`
-3. Enable Developer mode
-4. Load unpacked → select the extension directory
+1. Clone this repository.
+2. Open `chrome://extensions/`.
+3. Enable `Developer mode`.
+4. Click `Load unpacked` and select this folder.
 
-## Use
+## Notes
 
-- Open any contract page (e.g., `https://etherscan.io/address/[contract_address]`)
-- Use "Incoming" / "CA Create" on transaction list pages
-
-## Security
-
-- No external API calls
-- No tracking or data collection
-- Runs only on known explorer domains
+- The extension runs only on explorer domains listed in `manifest.json`.
+- It does not include analytics or user tracking.
+- Signature decoding may query public signature services when a selector is unknown locally.
 
 ## Credits
 
-Uses [EVMole](https://github.com/cdump/evmole) to extract selectors from bytecode.
+- [EVMole](https://github.com/cdump/evmole) for selector extraction from bytecode.
+- [abi-guesser](https://github.com/openchainxyz/abi-guesser) for ABI inference techniques that informed calldata decoding behavior.
+- [swiss-knife](https://github.com/swiss-knife-xyz/swiss-knife) for EVM calldata decoding inspiration and reference patterns.

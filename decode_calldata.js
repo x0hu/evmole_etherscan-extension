@@ -5,6 +5,9 @@
   let isDecoding = false;
   let nestedDecodeCount = 0; // Track nested decodes to only auto-expand first
   const pendingAutoExpand = {}; // Store calldata for auto-expand by ID
+  let disableInputViewAutoSet = false;
+  let originalAppliedForCalldata = null;
+  let originalViewRetryTimer = null;
 
   // Unit conversion options
   const UNIT_OPTIONS = [
@@ -21,8 +24,72 @@
       el.classList.add('show');
     }
   }
+
+  function getInputCalldataSignature() {
+    const inputEl = document.getElementById('inputdata');
+    if (!inputEl) return null;
+    const value = (inputEl.value || inputEl.textContent || '').trim();
+    if (!value) return '';
+    return `${value.slice(0, 66)}:${value.length}`;
+  }
+
+  function findInputOriginalViewLink() {
+    const links = Array.from(document.querySelectorAll('a.dropdown-item[onclick*="convertstr2"]'));
+    return links.find(link => {
+      const onclick = link.getAttribute('onclick') || '';
+      return onclick.includes("document.getElementById('inputdata')") &&
+             onclick.includes("'original'");
+    }) || null;
+  }
+
+  function setInputViewToOriginalDefault() {
+    if (disableInputViewAutoSet) return;
+
+    const signature = getInputCalldataSignature();
+    if (signature && originalAppliedForCalldata === signature) return;
+
+    const originalLink = findInputOriginalViewLink();
+    if (!originalLink) return;
+
+    const menu = originalLink.closest('.dropdown-menu');
+    const activeItem = menu ? menu.querySelector('.dropdown-item.active') : null;
+
+    if (activeItem === originalLink || originalLink.classList.contains('active')) {
+      if (signature) originalAppliedForCalldata = signature;
+      return;
+    }
+
+    originalLink.click();
+
+    if ((originalLink.classList.contains('active') || (menu && menu.querySelector('.dropdown-item.active') === originalLink)) && signature) {
+      originalAppliedForCalldata = signature;
+    }
+  }
+
+  function scheduleInputViewOriginalDefault() {
+    if (disableInputViewAutoSet) return;
+    if (originalViewRetryTimer) clearTimeout(originalViewRetryTimer);
+    originalViewRetryTimer = setTimeout(setInputViewToOriginalDefault, 150);
+  }
+
+  document.addEventListener('click', (event) => {
+    if (!event.isTrusted) return;
+    const target = event.target instanceof Element
+      ? event.target.closest('a.dropdown-item[onclick*="convertstr2"]')
+      : null;
+    if (!target) return;
+    const onclick = target.getAttribute('onclick') || '';
+    if (onclick.includes("document.getElementById('inputdata')")) {
+      disableInputViewAutoSet = true;
+    }
+  }, true);
+
   expandCollapse();
-  const observer = new MutationObserver(expandCollapse);
+  scheduleInputViewOriginalDefault();
+  const observer = new MutationObserver(() => {
+    expandCollapse();
+    scheduleInputViewOriginalDefault();
+  });
   observer.observe(document.body, { childList: true, subtree: true });
 
   // Common function selectors
@@ -322,6 +389,10 @@
     if (type === 'bool') {
       return { value: wordVal === 1n, len: 32, type: 'bool' };
     }
+    if (type.endsWith('[]')) {
+      const ptr = Number(wordVal);
+      return decodeArray(data, ptr, type.slice(0, -2));
+    }
     if (type.startsWith('uint')) {
       return { value: wordVal.toString(), len: 32, type };
     }
@@ -338,10 +409,6 @@
       // It's a pointer to dynamic data
       const ptr = Number(wordVal);
       return decodeDynamic(data, ptr, type);
-    }
-    if (type.endsWith('[]')) {
-      const ptr = Number(wordVal);
-      return decodeArray(data, ptr, type.slice(0, -2));
     }
     if (type.startsWith('(')) {
       // Check if tuple is static or dynamic
