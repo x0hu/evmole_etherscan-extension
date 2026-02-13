@@ -260,6 +260,10 @@
     }
   }
 
+  function isAddressHex(value) {
+    return typeof value === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value);
+  }
+
   function tryParsePackedExecutionData(executionData) {
     if (!isHex(executionData)) return null;
     const clean = executionData.slice(2);
@@ -274,6 +278,64 @@
       value: valueBig.toString(),
       data: inner
     };
+  }
+
+  function tryParseBatchExecutionData(executionData) {
+    if (!isHex(executionData)) return null;
+    try {
+      const decoded = decodeParam(executionData, 0, '(address,uint256,bytes)[]');
+      if (!decoded || !Array.isArray(decoded.value) || decoded.value.length === 0) return null;
+      const calls = [];
+      for (const call of decoded.value) {
+        if (!Array.isArray(call) || call.length < 3) return null;
+        const target = call[0];
+        const value = call[1];
+        const data = call[2];
+        if (!isAddressHex(target) || typeof value !== 'string' || !isHex(data)) return null;
+        calls.push([target, value, data]);
+      }
+      return calls;
+    } catch {
+      return null;
+    }
+  }
+
+  function tryParseAbiSingleExecutionData(executionData) {
+    if (!isHex(executionData)) return null;
+
+    // Form 1: abi.encode(address,uint256,bytes)
+    try {
+      const target = decodeParam(executionData, 0, 'address').value;
+      const value = decodeParam(executionData, 32, 'uint256').value;
+      const data = decodeParam(executionData, 64, 'bytes').value;
+      if (isAddressHex(target) && typeof value === 'string' && isHex(data)) {
+        return { target, value, data };
+      }
+    } catch {}
+
+    // Form 2: abi.encode((address,uint256,bytes))
+    try {
+      const tuple = decodeParam(executionData, 0, '(address,uint256,bytes)').value;
+      if (!Array.isArray(tuple) || tuple.length < 3) return null;
+      const target = tuple[0];
+      const value = tuple[1];
+      const data = tuple[2];
+      if (isAddressHex(target) && typeof value === 'string' && isHex(data)) {
+        return { target, value, data };
+      }
+    } catch {}
+
+    return null;
+  }
+
+  function tryParsePackedDelegateExecutionData(executionData) {
+    if (!isHex(executionData)) return null;
+    const clean = executionData.slice(2);
+    if (clean.length < 40) return null;
+    const target = '0x' + clean.slice(0, 40);
+    const data = '0x' + clean.slice(40);
+    if (!isAddressHex(target) || !isHex(data)) return null;
+    return { target, data };
   }
 
   async function tryDecodeWithAdapters(calldata, selector) {
@@ -1089,10 +1151,39 @@
     }
   });
 
-  // Adapter: ERC7579/AA execute(bytes32,bytes) where arg1 is packed:
-  // target(20) + value(32) + calldata(bytes)
+  // Adapter: ERC4337 handleOps v0.6 (selector 0x1fad948c)
   registerDecodeAdapter({
-    id: 'execute_bytes32_bytes_packed_single_call',
+    id: 'erc4337_handleops_v06',
+    match: ({ selector }) => selector === '0x1fad948c',
+    decode: ({ calldata, selector }) => {
+      const signature = KNOWN_SELECTORS[selector];
+      const types = parseSignatureTypes(signature);
+      const paramNames = ['ops', 'beneficiary'];
+      const params = [];
+      const paramData = slice(calldata, 4);
+      const dataLen = (paramData.length - 2) / 2;
+
+      let offset = 0;
+      for (let i = 0; i < types.length && offset < dataLen; i++) {
+        const res = decodeParam(paramData, offset, types[i]);
+        params.push({ name: paramNames[i] || `param${i}`, type: types[i], value: res.value });
+        offset += res.len;
+      }
+
+      return {
+        selector,
+        signature,
+        funcName: 'handleOps',
+        params
+      };
+    }
+  });
+
+  // Adapter: ERC7579/AA execute(bytes32,bytes)
+  // Decodes executionData by callType encoded in mode:
+  // 0x00 single, 0x01 batch, 0xff delegatecall.
+  registerDecodeAdapter({
+    id: 'execute_bytes32_bytes_mode_aware',
     match: ({ selector }) => selector === '0xe9ae5c53',
     decode: ({ calldata, selector }) => {
       const signature = KNOWN_SELECTORS[selector] || 'execute(bytes32,bytes)';
@@ -1163,8 +1254,54 @@
       }
 
       const executionData = '0x' + clean.slice(bytesStart, bytesEnd);
-      const packed = tryParsePackedExecutionData(executionData);
-      if (!packed) {
+      const callType = mode.slice(2, 4).toLowerCase();
+
+      // EIP-7579 callType byte:
+      // 0x00 = single, 0x01 = batch, 0xff = delegatecall
+      if (callType === '01') {
+        const batch = tryParseBatchExecutionData(executionData);
+        if (batch) {
+          return {
+            selector,
+            signature,
+            funcName: 'execute',
+            params: [
+              { name: 'mode', type: 'bytes32', value: mode },
+              { name: 'executionData', type: '(address,uint256,bytes)[]', value: batch }
+            ]
+          };
+        }
+      } else if (callType === 'ff') {
+        const delegate = tryParsePackedDelegateExecutionData(executionData);
+        if (delegate) {
+          return {
+            selector,
+            signature,
+            funcName: 'execute',
+            params: [
+              { name: 'mode', type: 'bytes32', value: mode },
+              { name: 'executionData', type: '(address,bytes)', value: [delegate.target, delegate.data] }
+            ]
+          };
+        }
+      } else if (callType === '00') {
+        const packedSingle = tryParsePackedExecutionData(executionData) || tryParseAbiSingleExecutionData(executionData);
+        if (packedSingle) {
+          return {
+            selector,
+            signature,
+            funcName: 'execute',
+            params: [
+              { name: 'mode', type: 'bytes32', value: mode },
+              { name: 'executionData', type: '(address,uint256,bytes)', value: [packedSingle.target, packedSingle.value, packedSingle.data] }
+            ]
+          };
+        }
+      }
+
+      // Fallbacks for non-standard wallets: try known single-call encodings.
+      const fallbackSingle = tryParsePackedExecutionData(executionData) || tryParseAbiSingleExecutionData(executionData);
+      if (!fallbackSingle) {
         return {
           selector,
           signature,
@@ -1182,7 +1319,7 @@
         funcName: 'execute',
         params: [
           { name: 'mode', type: 'bytes32', value: mode },
-          { name: 'executionData', type: '(address,uint256,bytes)', value: [packed.target, packed.value, packed.data] }
+          { name: 'executionData', type: '(address,uint256,bytes)', value: [fallbackSingle.target, fallbackSingle.value, fallbackSingle.data] }
         ]
       };
     }
