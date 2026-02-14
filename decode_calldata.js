@@ -3,8 +3,9 @@
   console.log('[decode_calldata] loaded adapter build v2');
   // Prevent duplicate decode calls
   let isDecoding = false;
-  let nestedDecodeCount = 0; // Track nested decodes to only auto-expand first
+  const AUTO_EXPAND_CONCURRENCY = 5;
   const pendingAutoExpand = {}; // Store calldata for auto-expand by ID
+  const autoExpandInFlight = new WeakSet();
   let disableInputViewAutoSet = false;
   let originalAppliedForCalldata = null;
   let originalViewRetryTimer = null;
@@ -235,6 +236,60 @@
     const [whole, decimal] = str.split('.');
     const formatted = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     return decimal ? `${formatted}.${decimal}` : formatted;
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function splitTrailingUrlPunctuation(url) {
+    let core = url;
+    let trailing = '';
+    while (core.length > 0) {
+      const ch = core.slice(-1);
+      if (!'.,;!?)]}'.includes(ch)) break;
+      core = core.slice(0, -1);
+      trailing = ch + trailing;
+    }
+    return { core, trailing };
+  }
+
+  function toIpfsGatewayUrl(uri) {
+    const prefix = 'ipfs://';
+    if (!uri || !uri.startsWith(prefix)) return null;
+    let path = uri.slice(prefix.length).replace(/^\/+/, '');
+    path = path.replace(/^ipfs\//i, '');
+    if (!path) return null;
+    return `https://ipfs.io/ipfs/${path}`;
+  }
+
+  function renderTextWithUrlLinks(value) {
+    const text = typeof value === 'string' ? value : String(value ?? '');
+    const urlRegex = /https?:\/\/[^\s<>"'`]+|ipfs:\/\/[^\s<>"'`]+/g;
+    let html = '';
+    let last = 0;
+    let match;
+
+    while ((match = urlRegex.exec(text)) !== null) {
+      const url = match[0];
+      html += escapeHtml(text.slice(last, match.index));
+      const { core, trailing } = splitTrailingUrlPunctuation(url);
+      const href = core.startsWith('ipfs://') ? toIpfsGatewayUrl(core) : core;
+      if (href) {
+        html += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(core)}</a>`;
+      } else {
+        html += escapeHtml(url);
+      }
+      if (trailing) html += escapeHtml(trailing);
+      last = urlRegex.lastIndex;
+    }
+
+    html += escapeHtml(text.slice(last));
+    return html;
   }
 
   // Check if bytes could be valid calldata (has non-zero selector)
@@ -1493,6 +1548,12 @@
       const date = new Date(Number(value) * 1000);
       return { html: `${value} (${date.toISOString()})`, isBytes: false };
     }
+    if (type === 'string') {
+      return {
+        html: `<span style="word-break:break-word;">${renderTextWithUrlLinks(value)}</span>`,
+        isBytes: false
+      };
+    }
     // uint256 with unit conversion dropdown
     if (type && (type.startsWith('uint') || type.startsWith('int'))) {
       const id = `unit-${paramId}`;
@@ -1572,7 +1633,10 @@
         isBytes: false
       };
     }
-    return { html: `<span style="word-break:break-word;">${String(value)}</span>`, isBytes: false };
+    if (typeof value === 'string') {
+      return { html: `<span style="word-break:break-word;">${renderTextWithUrlLinks(value)}</span>`, isBytes: false };
+    }
+    return { html: `<span style="word-break:break-word;">${escapeHtml(String(value))}</span>`, isBytes: false };
   }
 
   // Create decoded UI matching Etherscan's row style
@@ -1587,7 +1651,6 @@
     }
 
     const funcDisplay = result.signature || result.funcName || result.selector;
-    let firstBytesAutoExpanded = false;
 
     let paramsHtml = '';
     if (result.params && result.params.length > 0) {
@@ -1598,17 +1661,8 @@
         const paramId = `p${Date.now()}_${i}`;
         const formatted = formatValue(p.value, p.type, paramId);
 
-        // Auto-expand first nested bytes if not already done
-        let autoExpandId = null;
-        if (formatted.isBytes && !firstBytesAutoExpanded && nestedDecodeCount === 0) {
-          firstBytesAutoExpanded = true;
-          autoExpandId = `nested-${paramId}`;
-          pendingAutoExpand[autoExpandId] = formatted.bytesValue;
-          nestedDecodeCount++;
-        }
-
         const truncatedType = typeLabel.length > 25 ? typeLabel.slice(0, 25) + '...' : typeLabel;
-        paramsHtml += `<div class="mb-2" style="font-size:12px;max-width:100%;" ${autoExpandId ? `data-auto-expand="${autoExpandId}"` : ''}>
+        paramsHtml += `<div class="mb-2" style="font-size:12px;max-width:100%;">
           <div class="d-flex align-items-center gap-1 mb-1">
             <span class="text-muted">[${i}]</span>
             <span class="badge bg-secondary bg-opacity-10 border border-secondary border-opacity-25 text-dark fw-medium py-1 px-2" title="${typeLabel}">${truncatedType}</span>
@@ -1702,7 +1756,7 @@
         decodedDiv.appendChild(nestedUI);
         attachEventListeners(decodedDiv);
         // Process auto-expand for nested
-        processAutoExpand(decodedDiv);
+        await processAutoExpand(decodedDiv);
       }
       if (icon) {
         icon.classList.remove('fa-chevron-right');
@@ -1762,6 +1816,7 @@
         }).join('');
         decodedDiv.innerHTML = `<div class="border-start border-2 ps-3 mt-2 bg-light bg-opacity-50 p-2 rounded">${paramsHtml}</div>`;
         attachEventListeners(decodedDiv);
+        await processAutoExpand(decodedDiv);
       }
       if (icon) {
         icon.classList.remove('fa-chevron-right');
@@ -1822,16 +1877,63 @@
     });
   }
 
-  // Auto-expand first nested bytes
-  function processAutoExpand(container) {
-    const autoExpand = container.querySelector('[data-auto-expand]');
-    if (autoExpand) {
-      const id = autoExpand.getAttribute('data-auto-expand');
-      const nestedContainer = document.getElementById(id);
-      if (nestedContainer) {
-        setTimeout(() => handleNestedDecode(nestedContainer), 100);
+  async function runWithConcurrencyLimit(tasks, limit) {
+    if (!Array.isArray(tasks) || tasks.length === 0) return;
+
+    const workerCount = Math.max(1, Math.min(limit, tasks.length));
+    let nextTaskIndex = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (nextTaskIndex < tasks.length) {
+        const taskIndex = nextTaskIndex++;
+        try {
+          await tasks[taskIndex]();
+        } catch (e) {
+          console.error('[decode_calldata] auto-expand task failed:', e);
+        }
       }
+    });
+
+    await Promise.allSettled(workers);
+  }
+
+  // Auto-expand nested decode sections so full nested view is shown by default
+  async function processAutoExpand(container) {
+    if (!container) return;
+
+    const tasks = [];
+
+    // Expand calldata-like nested bytes with bounded parallelism.
+    const nestedContainers = Array.from(container.querySelectorAll('.nested-bytes'));
+    for (const nestedContainer of nestedContainers) {
+      const decodedDiv = nestedContainer.querySelector('.nested-decoded');
+      if (!decodedDiv || decodedDiv.children.length > 0 || autoExpandInFlight.has(nestedContainer)) continue;
+      tasks.push(async () => {
+        autoExpandInFlight.add(nestedContainer);
+        try {
+          await handleNestedDecode(nestedContainer);
+        } finally {
+          autoExpandInFlight.delete(nestedContainer);
+        }
+      });
     }
+
+    // Expand raw ABI sections too, if present.
+    const abiContainers = Array.from(container.querySelectorAll('.nested-abi'));
+    for (const abiContainer of abiContainers) {
+      const decodedDiv = abiContainer.querySelector('.abi-decoded');
+      if (!decodedDiv || decodedDiv.children.length > 0 || autoExpandInFlight.has(abiContainer)) continue;
+      tasks.push(async () => {
+        autoExpandInFlight.add(abiContainer);
+        try {
+          await handleABIDecode(abiContainer);
+        } finally {
+          autoExpandInFlight.delete(abiContainer);
+        }
+      });
+    }
+
+    await runWithConcurrencyLimit(tasks, AUTO_EXPAND_CONCURRENCY);
   }
 
   // Main function
@@ -1846,8 +1948,6 @@
     if (!calldata || !calldata.startsWith('0x') || calldata.length < 10) return;
 
     isDecoding = true;
-    nestedDecodeCount = 0; // Reset for each new decode
-
     try {
       const result = await decodeCalldata(calldata.trim());
       if (result.error) return;
@@ -1862,8 +1962,8 @@
         inputRow.parentNode.insertBefore(ui, inputRow.nextSibling);
         // Attach event listeners
         attachEventListeners(ui);
-        // Auto-expand first nested bytes
-        processAutoExpand(ui);
+        // Auto-expand nested decoded sections for full view
+        await processAutoExpand(ui);
       }
     } catch (e) {
       console.error('Calldata decode error:', e);

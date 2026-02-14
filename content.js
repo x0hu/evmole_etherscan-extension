@@ -1,5 +1,9 @@
 function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function injectScript(file, node) {
@@ -78,12 +82,70 @@ function escapeHtml(str) {
     return `${window.location.origin}/address/${address}`;
   }
 
-  function renderValueWithAddressLinks(value) {
+  function splitTrailingUrlPunctuation(url) {
+    let core = url;
+    let trailing = '';
+    while (core.length > 0) {
+      const ch = core.slice(-1);
+      if (!'.,;!?)]}'.includes(ch)) break;
+      core = core.slice(0, -1);
+      trailing = ch + trailing;
+    }
+    return { core, trailing };
+  }
+
+  function toIpfsGatewayUrl(uri) {
+    const prefix = 'ipfs://';
+    if (!uri || !uri.startsWith(prefix)) return null;
+    let path = uri.slice(prefix.length).replace(/^\/+/, '');
+    path = path.replace(/^ipfs\//i, '');
+    if (!path) return null;
+    return `https://ipfs.io/ipfs/${path}`;
+  }
+
+  function renderInlineLinks(value, { addressLinks = true } = {}) {
     const text = typeof value === 'string' ? value : String(value ?? '');
-    const escaped = escapeHtml(text);
-    return escaped.replace(/0x[a-fA-F0-9]{40}/g, address =>
-      `<a class="result-address-link" href="${getExplorerAddressUrl(address)}" target="_blank" rel="noopener noreferrer">${address}</a>`
-    );
+    const tokenRegex = /https?:\/\/[^\s<>"'`]+|ipfs:\/\/[^\s<>"'`]+|0x[a-fA-F0-9]{40}/g;
+    let html = '';
+    let last = 0;
+    let match;
+
+    while ((match = tokenRegex.exec(text)) !== null) {
+      const token = match[0];
+      html += escapeHtml(text.slice(last, match.index));
+
+      if (token.startsWith('http://') || token.startsWith('https://')) {
+        const { core, trailing } = splitTrailingUrlPunctuation(token);
+        if (core) {
+          html += `<a class="result-link" href="${escapeHtml(core)}" target="_blank" rel="noopener noreferrer">${escapeHtml(core)}</a>`;
+        } else {
+          html += escapeHtml(token);
+        }
+        if (trailing) html += escapeHtml(trailing);
+      } else if (token.startsWith('ipfs://')) {
+        const { core, trailing } = splitTrailingUrlPunctuation(token);
+        const gatewayUrl = toIpfsGatewayUrl(core);
+        if (gatewayUrl) {
+          html += `<a class="result-link" href="${escapeHtml(gatewayUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(core)}</a>`;
+        } else {
+          html += escapeHtml(token);
+        }
+        if (trailing) html += escapeHtml(trailing);
+      } else if (addressLinks) {
+        html += `<a class="result-address-link" href="${getExplorerAddressUrl(token)}" target="_blank" rel="noopener noreferrer">${token}</a>`;
+      } else {
+        html += escapeHtml(token);
+      }
+
+      last = tokenRegex.lastIndex;
+    }
+
+    html += escapeHtml(text.slice(last));
+    return html;
+  }
+
+  function renderValueWithAddressLinks(value) {
+    return renderInlineLinks(value, { addressLinks: true });
   }
 
   function displayFunctionSelectors() {
@@ -354,7 +416,7 @@ function escapeHtml(str) {
             });
           } else {
             resultDiv.className = 'query-result error';
-            resultDiv.textContent = error;
+            resultDiv.innerHTML = renderInlineLinks(error, { addressLinks: false });
           }
         }
       }
@@ -373,12 +435,15 @@ function escapeHtml(str) {
             const TRUNC = 60;
             const html = formatted.map(e => {
               const escaped = escapeHtml(e.value);
-              const isTrunc = e.type === 'str' && e.value.length > TRUNC;
+              const hasInlineLink = /https?:\/\/[^\s<>"'`]+/.test(e.value) || /ipfs:\/\/[^\s<>"'`]+/.test(e.value) || /0x[a-fA-F0-9]{40}/.test(e.value);
+              const isTrunc = e.type === 'str' && e.value.length > TRUNC && !hasInlineLink;
               let val;
               if (e.type === 'addr' && /^0x[a-fA-F0-9]{40}$/.test(e.value)) {
                 val = `<a class="tuple-val result-address-link" href="${getExplorerAddressUrl(e.value)}" target="_blank" rel="noopener noreferrer">${escaped}</a>`;
               } else if (isTrunc) {
                 val = `<span class="tuple-val truncated" data-full="${escaped}">${escapeHtml(e.value.slice(0, TRUNC))}…</span>`;
+              } else if (e.type === 'str') {
+                val = `<span class="tuple-val">${renderInlineLinks(e.value, { addressLinks: true })}</span>`;
               } else {
                 val = `<span class="tuple-val">${escaped}</span>`;
               }
