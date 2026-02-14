@@ -27,6 +27,10 @@ const CHAIN_CONFIG = {
   'testnet.monadscan.com': { rpcs: ['https://testnet-rpc.monad.xyz'] },
   // Mainnets
   'etherscan.io': { rpcs: ['https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://rpc.ankr.com/eth'] },
+  'mega.etherscan.io': { rpcs: ['https://mainnet.megaeth.com/rpc', 'https://megaeth.drpc.org', 'https://rpc-megaeth-mainnet.globalstake.io'] },
+  'fraxscan.com': { rpcs: ['https://rpc.frax.com', 'https://fraxtal-rpc.publicnode.com', 'https://fraxtal.gateway.tenderly.co'] },
+  'hyperevmscan.io': { rpcs: ['https://rpc.hypurrscan.io', 'https://rpc.hyperliquid.xyz/evm', 'https://hyperliquid.drpc.org', 'https://hyperliquid-json-rpc.stakely.io'] },
+  'taikoscan.io': { rpcs: ['https://rpc.ankr.com/taiko', 'https://rpc.taiko.xyz', 'https://rpc.mainnet.taiko.xyz', 'https://taiko.drpc.org'] },
   'basescan.org': { rpcs: [
     'https://base-rpc.publicnode.com',
     'https://base.lava.build',
