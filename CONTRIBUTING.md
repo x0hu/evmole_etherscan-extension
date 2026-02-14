@@ -16,7 +16,7 @@ Chrome extension (Manifest V3) that adds function selector panels and QOL button
 ├── qol_buttons.js                 # Content script: adds "Incoming" / "CA Create" buttons, auto-selects 100 rows
 ├── styles.css                     # Web-accessible stylesheet for the function selector panel
 ├── README.md                      # Install + usage docs
-├── .gitignore                     # Ignores .devcontainer/
+├── .gitignore                     # Ignores .devcontainer
 ├── .gitattributes                 # LF normalization
 ├── screenshot1.png                # Function selector panel screenshot
 ├── screenshot2.png                # QOL buttons screenshot
