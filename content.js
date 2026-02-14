@@ -74,6 +74,18 @@ function escapeHtml(str) {
     return match ? match[1] : null;
   }
 
+  function getExplorerAddressUrl(address) {
+    return `${window.location.origin}/address/${address}`;
+  }
+
+  function renderValueWithAddressLinks(value) {
+    const text = typeof value === 'string' ? value : String(value ?? '');
+    const escaped = escapeHtml(text);
+    return escaped.replace(/0x[a-fA-F0-9]{40}/g, address =>
+      `<a class="result-address-link" href="${getExplorerAddressUrl(address)}" target="_blank" rel="noopener noreferrer">${address}</a>`
+    );
+  }
+
   function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
     const bytecodeElements = Array.from(document.querySelectorAll('pre.wordwrap.scrollbar-custom, .wordwrap.scrollbar-custom'));
@@ -190,9 +202,11 @@ function escapeHtml(str) {
             // Add click handlers for queryable functions
             panel.querySelectorAll('.selector-item.queryable').forEach(item => {
               item.addEventListener('click', (e) => {
-                if (e.target.classList.contains('query-btn')) return;
+                if (e.target.closest('.query-dropdown')) return;
                 const dropdown = item.querySelector('.query-dropdown');
-                dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+                if (dropdown.style.display === 'none') {
+                  dropdown.style.display = 'block';
+                }
               });
 
               const queryBtn = item.querySelector('.query-btn');
@@ -262,7 +276,8 @@ function escapeHtml(str) {
                 </div>`;
             }
 
-            resultDiv.innerHTML = `<span class="result-value">${result}</span>${controls}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
+            const renderedValue = renderValueWithAddressLinks(result);
+            resultDiv.innerHTML = `<span class="result-value">${renderedValue}</span>${controls}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
 
             // Tuple format toggle
             if (isTuple) {
@@ -312,7 +327,11 @@ function escapeHtml(str) {
                     const divisor = BigInt(parseFloat(unit));
                     converted = divisor === 1n ? rawValue.toString() : (Number(rawValue) / Number(divisor)).toString();
                   }
-                  valueSpan.textContent = converted;
+                  if (/^0x[a-fA-F0-9]{40}$/.test(converted)) {
+                    valueSpan.innerHTML = renderValueWithAddressLinks(converted);
+                  } else {
+                    valueSpan.textContent = converted;
+                  }
                   resultDiv.querySelector('.js-clipboard').dataset.clipboardText = converted;
                   menu.classList.remove('show');
                 });
@@ -355,9 +374,14 @@ function escapeHtml(str) {
             const html = formatted.map(e => {
               const escaped = escapeHtml(e.value);
               const isTrunc = e.type === 'str' && e.value.length > TRUNC;
-              const val = isTrunc
-                ? `<span class="tuple-val truncated" data-full="${escaped}">${escapeHtml(e.value.slice(0, TRUNC))}…</span>`
-                : `<span class="tuple-val">${escaped}</span>`;
+              let val;
+              if (e.type === 'addr' && /^0x[a-fA-F0-9]{40}$/.test(e.value)) {
+                val = `<a class="tuple-val result-address-link" href="${getExplorerAddressUrl(e.value)}" target="_blank" rel="noopener noreferrer">${escaped}</a>`;
+              } else if (isTrunc) {
+                val = `<span class="tuple-val truncated" data-full="${escaped}">${escapeHtml(e.value.slice(0, TRUNC))}…</span>`;
+              } else {
+                val = `<span class="tuple-val">${escaped}</span>`;
+              }
               return `<div class="tuple-entry"><span class="tuple-idx">[${e.idx}]</span><span class="tuple-type type-${e.type}">${e.type}</span>${val}</div>`;
             }).join('');
             valueSpan.innerHTML = html;
@@ -372,7 +396,7 @@ function escapeHtml(str) {
             if (clipboardBtn) clipboardBtn.dataset.clipboardText = plain;
           } else {
             resultDiv.classList.remove('auto-mode');
-            if (valueSpan) valueSpan.textContent = formatted;
+            if (valueSpan) valueSpan.innerHTML = renderValueWithAddressLinks(formatted);
             if (clipboardBtn) clipboardBtn.dataset.clipboardText = formatted;
           }
         }

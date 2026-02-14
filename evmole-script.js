@@ -1,5 +1,4 @@
 import { functionSelectors, functionArguments, functionStateMutability } from 'https://cdn.jsdelivr.net/npm/evmole@0.5.1/dist/evmole.mjs';
-import { createPublicClient, http, fallback } from 'https://esm.sh/viem@2.21.0';
 
 // Proxy storage slots
 const PROXY_SLOTS = {
@@ -12,6 +11,14 @@ const PROXY_SLOTS = {
 // EIP-1167 minimal proxy pattern
 const MINIMAL_PROXY_REGEX = /^0x363d3d373d3d3d363d73([a-fA-F0-9]{40})5af43d82803e903d91602b57fd5bf3$/;
 const PROXY_SELECTOR_THRESHOLD = 8;
+const SAFE_PROXY_RUNTIME_EXACT = '0x608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033';
+const SAFE_FALLBACK_FUNCTIONS = [
+  { selector: '0xa0e67e2b', args: '()', mutability: 'view', signature: 'getOwners()' },
+  { selector: '0xe75235b8', args: '()', mutability: 'view', signature: 'getThreshold()' },
+  { selector: '0xaffed0e0', args: '()', mutability: 'view', signature: 'nonce()' },
+  { selector: '0xa619486e', args: '()', mutability: 'view', signature: 'masterCopy()' },
+  { selector: '0xffa1ad74', args: '()', mutability: 'view', signature: 'VERSION()' },
+];
 
 const CHAIN_CONFIG = {
   // Testnets (check first - more specific hostnames)
@@ -20,7 +27,19 @@ const CHAIN_CONFIG = {
   'testnet.monadscan.com': { rpcs: ['https://testnet-rpc.monad.xyz'] },
   // Mainnets
   'etherscan.io': { rpcs: ['https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://rpc.ankr.com/eth'] },
-  'basescan.org': { rpcs: ['https://base-mainnet.gateway.tatum.io', 'https://base.drpc.org', 'https://base-rpc.publicnode.com', 'https://base.lava.build'] },
+  'basescan.org': { rpcs: [
+    'https://base-rpc.publicnode.com',
+    'https://base.lava.build',
+    'https://base.drpc.org',
+    'https://base.public.blockpi.network/v1/rpc/public',
+    'https://base-public.nodies.app',
+    'https://gateway.tenderly.co/public/base',
+    'https://base.rpc.blxrbdn.com',
+    'https://base.api.pocket.network',
+    'https://api-base-mainnet-archive.n.dwellir.com/2ccf18bf-2916-4198-8856-42172854353c',
+    'https://mainnet.base.org',
+    'https://base-mainnet.gateway.tatum.io'
+  ] },
   'arbiscan.io': { rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum.drpc.org', 'https://rpc.ankr.com/arbitrum'] },
   'optimistic.etherscan.io': { rpcs: ['https://mainnet.optimism.io', 'https://optimism.drpc.org', 'https://rpc.ankr.com/optimism'] },
   'polygonscan.com': { rpcs: ['https://polygon-rpc.com', 'https://polygon.drpc.org', 'https://rpc.ankr.com/polygon'] },
@@ -43,6 +62,10 @@ const CHAIN_CONFIG = {
 
 const QUERY_HEDGE_STAGGER_MS = 180;
 const QUERY_HEDGE_MAX_RPCS = 3;
+const RPC_COOLDOWN_429_MS = 2 * 60 * 1000;
+const RPC_COOLDOWN_403_MS = 10 * 60 * 1000;
+const RPC_COOLDOWN_NETWORK_MS = 30 * 1000;
+const rpcCooldownUntil = new Map();
 
 function getChainConfig() {
   const host = window.location.hostname;
@@ -65,16 +88,53 @@ function getContractAddress() {
   return match ? match[1] : null;
 }
 
-function createClient() {
-  const config = getChainConfig();
-  const transports = config.rpcs.map(rpc => http(rpc));
-  return createPublicClient({
-    transport: fallback(transports, { rank: true, retryCount: 2 })
-  });
+function getCandidateRpcs(maxRpcs = QUERY_HEDGE_MAX_RPCS) {
+  const now = Date.now();
+  const configured = getChainConfig().rpcs;
+  const healthy = configured.filter(rpc => (rpcCooldownUntil.get(rpc) || 0) <= now);
+  const pool = healthy.length > 0 ? healthy : configured;
+  return pool.slice(0, Math.max(1, maxRpcs));
+}
+
+function maybeCooldownRpc(rpc, error) {
+  const msg = formatRpcError(error);
+  if (!msg || msg.includes('AbortError') || msg.includes('Cancelled')) return;
+
+  let cooldownMs = 0;
+  if (/HTTP 429|Too Many Requests|rate limit/i.test(msg)) {
+    cooldownMs = RPC_COOLDOWN_429_MS;
+  } else if (/HTTP 403|Forbidden/i.test(msg)) {
+    cooldownMs = RPC_COOLDOWN_403_MS;
+  } else if (/Failed to fetch|NetworkError|Load failed|timeout|CORS/i.test(msg)) {
+    cooldownMs = RPC_COOLDOWN_NETWORK_MS;
+  }
+
+  if (cooldownMs > 0) {
+    rpcCooldownUntil.set(rpc, Date.now() + cooldownMs);
+  }
 }
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function formatSelectorDetail({ selector, args, mutability, signature }) {
+  return `${selector}: ${args} ${mutability}\n    ${signature}`;
+}
+
+function isSafeProxyRuntimeBytecode(bytecode) {
+  if (!bytecode || typeof bytecode !== 'string' || !bytecode.startsWith('0x')) return false;
+  const normalized = bytecode.toLowerCase();
+
+  if (normalized === SAFE_PROXY_RUNTIME_EXACT) {
+    return true;
+  }
+
+  // Match core SafeProxy runtime behavior even if metadata tail differs.
+  const hasMasterCopySelectorGate = normalized.includes('7fa619486e00000000000000000000000000000000000000000000000000000000');
+  const hasSlotZeroLoad = normalized.includes('73ffffffffffffffffffffffffffffffffffffffff60005416');
+  const hasDelegateFallback = normalized.includes('3660008037600080366000845af43d6000803e6000811415');
+  return hasMasterCopySelectorGate && hasSlotZeroLoad && hasDelegateFallback;
 }
 
 function formatRpcError(error) {
@@ -84,15 +144,15 @@ function formatRpcError(error) {
   return error.message || String(error);
 }
 
-async function rawEthCall(rpc, to, data, signal) {
+async function rawRpcRequest(rpc, method, params, signal) {
   const response = await fetch(rpc, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: Date.now() + Math.floor(Math.random() * 1000),
-      method: 'eth_call',
-      params: [{ to, data }, 'latest']
+      method,
+      params
     }),
     signal
   });
@@ -106,16 +166,15 @@ async function rawEthCall(rpc, to, data, signal) {
     throw new Error(payload.error.message || 'JSON-RPC error');
   }
 
-  const result = payload?.result;
-  if (typeof result !== 'string' || !result.startsWith('0x')) {
-    throw new Error('Invalid eth_call result');
+  if (!Object.prototype.hasOwnProperty.call(payload || {}, 'result')) {
+    throw new Error(`Invalid ${method} result`);
   }
 
-  return result;
+  return payload.result;
 }
 
-async function hedgedReadCall(contractAddress, selector) {
-  const rpcs = getChainConfig().rpcs.slice(0, QUERY_HEDGE_MAX_RPCS);
+async function hedgedRpcRequest(method, params, { maxRpcs = QUERY_HEDGE_MAX_RPCS, staggerMs = QUERY_HEDGE_STAGGER_MS } = {}) {
+  const rpcs = getCandidateRpcs(maxRpcs);
   if (rpcs.length === 0) {
     throw new Error('No RPC endpoints configured');
   }
@@ -126,7 +185,7 @@ async function hedgedReadCall(contractAddress, selector) {
   try {
     const attempts = rpcs.map((rpc, index) => (async () => {
       if (index > 0) {
-        await delay(QUERY_HEDGE_STAGGER_MS * index);
+        await delay(staggerMs * index);
       }
 
       if (settled) {
@@ -136,8 +195,13 @@ async function hedgedReadCall(contractAddress, selector) {
       const controller = new AbortController();
       controllers.push(controller);
 
-      const data = await rawEthCall(rpc, contractAddress, selector, controller.signal);
-      return { data, rpc };
+      try {
+        const result = await rawRpcRequest(rpc, method, params, controller.signal);
+        return { result, rpc };
+      } catch (err) {
+        maybeCooldownRpc(rpc, err);
+        throw err;
+      }
     })());
 
     const winner = await Promise.any(attempts);
@@ -157,7 +221,41 @@ async function hedgedReadCall(contractAddress, selector) {
   }
 }
 
-async function detectProxyImplementation(client, address, bytecode) {
+async function hedgedReadCall(contractAddress, selector, { allowEmpty = false, maxRpcs, staggerMs } = {}) {
+  const winner = await hedgedRpcRequest(
+    'eth_call',
+    [{ to: contractAddress, data: selector }, 'latest'],
+    { maxRpcs, staggerMs }
+  );
+  const data = winner.result;
+  if (typeof data !== 'string' || !data.startsWith('0x')) {
+    throw new Error('Invalid eth_call result');
+  }
+  if (!allowEmpty && data === '0x') {
+    throw new Error(`Empty response from ${winner.rpc}`);
+  }
+  return { data, rpc: winner.rpc };
+}
+
+async function hedgedGetCode(address, { maxRpcs = 2, staggerMs = 120 } = {}) {
+  const winner = await hedgedRpcRequest('eth_getCode', [address, 'latest'], { maxRpcs, staggerMs });
+  const code = winner.result;
+  if (typeof code !== 'string' || !code.startsWith('0x')) {
+    throw new Error('Invalid eth_getCode result');
+  }
+  return { code, rpc: winner.rpc };
+}
+
+async function hedgedGetStorageAt(address, slot, { maxRpcs = 2, staggerMs = 120 } = {}) {
+  const winner = await hedgedRpcRequest('eth_getStorageAt', [address, slot, 'latest'], { maxRpcs, staggerMs });
+  const value = winner.result;
+  if (typeof value !== 'string' || !value.startsWith('0x')) {
+    throw new Error('Invalid eth_getStorageAt result');
+  }
+  return { value, rpc: winner.rpc };
+}
+
+async function detectProxyImplementation(address, bytecode) {
   const ZERO_ADDR = '0x' + '0'.repeat(40);
 
   // 1. Check EIP-1167 minimal proxy (bytecode pattern) - instant, no RPC
@@ -178,7 +276,7 @@ async function detectProxyImplementation(client, address, bytecode) {
   // 3. Check storage slots in parallel
   const slotChecks = Object.entries(PROXY_SLOTS).map(async ([name, slot]) => {
     try {
-      const value = await client.getStorageAt({ address, slot });
+      const { value } = await hedgedGetStorageAt(address, slot);
       if (value && value !== '0x' + '0'.repeat(64)) {
         const impl = '0x' + value.slice(-40);
         if (impl !== ZERO_ADDR) {
@@ -192,7 +290,7 @@ async function detectProxyImplementation(client, address, bytecode) {
   // 4. Check custom pattern: impl stored at slot = contract address
   const selfSlotCheck = (async () => {
     try {
-      const value = await client.getStorageAt({ address, slot: address });
+      const { value } = await hedgedGetStorageAt(address, address);
       if (value && value !== '0x' + '0'.repeat(64)) {
         const impl = '0x' + value.slice(-40);
         if (impl !== ZERO_ADDR) {
@@ -206,12 +304,9 @@ async function detectProxyImplementation(client, address, bytecode) {
   // Also check implementation() call in parallel
   const implCallCheck = (async () => {
     try {
-      const result = await client.call({
-        to: address,
-        data: '0x5c60da1b', // implementation()
-      });
-      if (result.data && result.data !== '0x' && result.data.length >= 66) {
-        const impl = '0x' + result.data.slice(-40);
+      const { data } = await hedgedReadCall(address, '0x5c60da1b', { allowEmpty: true }); // implementation()
+      if (data && data !== '0x' && data.length >= 66) {
+        const impl = '0x' + data.slice(-40);
         if (impl !== ZERO_ADDR) {
           return { name: 'implementation()', impl };
         }
@@ -231,12 +326,12 @@ async function detectProxyImplementation(client, address, bytecode) {
   return null;
 }
 
-async function getImplementationBytecode(client, address, proxyBytecode) {
-  const implAddress = await detectProxyImplementation(client, address, proxyBytecode);
+async function getImplementationBytecode(address, proxyBytecode) {
+  const implAddress = await detectProxyImplementation(address, proxyBytecode);
   if (!implAddress) return null;
 
   try {
-    const implBytecode = await client.getCode({ address: implAddress });
+    const { code: implBytecode } = await hedgedGetCode(implAddress);
     if (implBytecode && implBytecode !== '0x') {
       return { address: implAddress, bytecode: implBytecode };
     }
@@ -292,14 +387,42 @@ function decodeStringResult(hexData) {
   const bytesHex = data.slice(byteStart, byteEnd);
   const bytes = new Uint8Array(bytesHex.match(/.{2}/g).map(b => parseInt(b, 16)));
   try {
-    return new TextDecoder().decode(bytes);
+    const decoded = new TextDecoder().decode(bytes);
+    // Avoid misclassifying non-string dynamic ABI data (e.g. address[] with null bytes) as string.
+    if (!decoded || /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(decoded)) return null;
+    return decoded;
   } catch (e) {
     return null;
   }
 }
 
+function decodeAddressArrayResult(hexData) {
+  if (!hexData || !hexData.startsWith('0x') || hexData.length < 130) return null;
+  const data = hexData.slice(2);
+  if (data.length % 64 !== 0) return null;
+
+  const offset = BigInt('0x' + data.slice(0, 64));
+  if (offset !== 32n) return null;
+
+  const len = Number(BigInt('0x' + data.slice(64, 128)));
+  if (!Number.isFinite(len) || len < 0 || len > 1024) return null;
+
+  const requiredChars = 128 + len * 64;
+  if (data.length < requiredChars) return null;
+
+  const values = [];
+  for (let i = 0; i < len; i++) {
+    const start = 128 + i * 64;
+    const word = data.slice(start, start + 64);
+    if (!word.startsWith('0'.repeat(24))) return null;
+    values.push('0x' + word.slice(24));
+  }
+  return values;
+}
+
 async function queryReadFunction(selector, signature, contractAddress) {
   const fnName = signature.split('(')[0];
+  const lowerFnName = fnName.toLowerCase();
 
   // Do raw call first to check response length
   try {
@@ -310,6 +433,13 @@ async function queryReadFunction(selector, signature, contractAddress) {
     }
 
     const dataLen = (rawResult.data.length - 2) / 2; // bytes length
+
+    if (lowerFnName === 'getowners') {
+      const owners = decodeAddressArrayResult(rawResult.data);
+      if (owners) {
+        return { success: true, result: owners.length ? owners.join(', ') : '[]' };
+      }
+    }
 
     const stringResult = decodeStringResult(rawResult.data);
     if (stringResult !== null) {
@@ -544,11 +674,11 @@ async function extractFunctions() {
     if (!code) {
       console.log('No bytecode in HTML, fetching via RPC...');
       try {
-        const client = createClient();
-        code = await client.getCode({ address: contractAddress });
+        const fetched = await hedgedGetCode(contractAddress, { maxRpcs: 3, staggerMs: 100 });
+        code = fetched.code;
         if (code && code !== '0x') {
           bytecodeSource = 'rpc';
-          console.log('Bytecode fetched via RPC, length:', code.length);
+          console.log('Bytecode fetched via RPC, length:', code.length, 'rpc:', fetched.rpc);
         } else {
           console.log('No bytecode found via RPC');
           window.postMessage({ type: 'FUNCTION_SELECTORS_RESULT', selectors: [], error: 'No bytecode found' }, '*');
@@ -574,12 +704,25 @@ async function extractFunctions() {
     let implInfo = null;
     let bytecodeToAnalyze = code;
     const initialSelectors = functionSelectors(code);
+    const isSafeRuntime = isSafeProxyRuntimeBytecode(code);
+
+    if (initialSelectors.length === 0 && isSafeRuntime) {
+      console.log('Safe proxy runtime fingerprint matched, skipping proxy RPC detection');
+      const finalSelectors = SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail);
+      window.postMessage({
+        type: 'FUNCTION_SELECTORS_RESULT',
+        selectors: finalSelectors,
+        implementationAddress: null,
+        bytecodeSource
+      }, '*');
+      return;
+    }
+
     if (initialSelectors.length >= PROXY_SELECTOR_THRESHOLD) {
       console.log('Skipping proxy detection (selector count >= threshold):', initialSelectors.length);
     } else {
-      const client = createClient();
       console.log('Checking for proxy implementation...');
-      implInfo = await getImplementationBytecode(client, contractAddress, code);
+      implInfo = await getImplementationBytecode(contractAddress, code);
       if (implInfo) {
         console.log('Proxy detected! Implementation:', implInfo.address);
         bytecodeToAnalyze = implInfo.bytecode;
@@ -605,10 +748,16 @@ async function extractFunctions() {
       return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
     }));
 
-    console.log('Selectors:', selectorsWithDetails);
+    let finalSelectors = selectorsWithDetails;
+    if (finalSelectors.length === 0 && isSafeRuntime) {
+      console.log('Safe proxy runtime fingerprint matched, using fallback read selectors');
+      finalSelectors = SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail);
+    }
+
+    console.log('Selectors:', finalSelectors);
     window.postMessage({
       type: 'FUNCTION_SELECTORS_RESULT',
-      selectors: selectorsWithDetails,
+      selectors: finalSelectors,
       implementationAddress: implInfo?.address || null,
       bytecodeSource
     }, '*');

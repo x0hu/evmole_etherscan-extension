@@ -287,6 +287,16 @@
   font-size: 11px;
 }
 
+.result-address-link {
+  color: #8fc6ff;
+  text-decoration: none;
+}
+
+.result-address-link:hover {
+  color: #b8dcff;
+  text-decoration: underline;
+}
+
 .query-result .js-clipboard,
 .query-result .unit-toggle {
   flex-shrink: 0;
