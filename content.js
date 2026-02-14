@@ -320,9 +320,9 @@ function escapeHtml(str) {
             if (isTuple) {
               controls = `
                 <div class="format-toggle">
-                  <a href="javascript:;" data-mode="dec" class="fmt-option active">Dec</a>
+                  <a href="javascript:;" data-mode="dec" class="fmt-option">Dec</a>
                   <a href="javascript:;" data-mode="hex" class="fmt-option">Hex</a>
-                  <a href="javascript:;" data-mode="auto" class="fmt-option">Auto</a>
+                  <a href="javascript:;" data-mode="auto" class="fmt-option active">Auto</a>
                 </div>`;
             } else if (isNumeric) {
               controls = `
@@ -343,7 +343,6 @@ function escapeHtml(str) {
 
             // Tuple format toggle
             if (isTuple) {
-              const valueSpan = resultDiv.querySelector('.result-value');
               resultDiv.querySelectorAll('.fmt-option').forEach(opt => {
                 opt.addEventListener('click', (e) => {
                   e.stopPropagation();
@@ -358,6 +357,14 @@ function escapeHtml(str) {
                   }, '*');
                 });
               });
+
+              // Default tuple display mode is Auto when available.
+              window.postMessage({
+                type: 'FORMAT_TUPLE',
+                selector,
+                chunks: rawChunks,
+                mode: 'auto'
+              }, '*');
             }
 
             // Unit conversion
