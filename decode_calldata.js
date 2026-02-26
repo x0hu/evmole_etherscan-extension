@@ -4,8 +4,13 @@
   // Prevent duplicate decode calls
   let isDecoding = false;
   const AUTO_EXPAND_CONCURRENCY = 5;
+  const MAX_AUTO_EXPAND_DEPTH = 4;
+  const MAX_AUTO_EXPAND_ITEMS = 150;
+  const MAX_AUTO_EXPAND_HEX_BYTES = 32768;
+  const MAX_NESTED_DECODE_DEPTH = 12;
   const pendingAutoExpand = {}; // Store calldata for auto-expand by ID
   const autoExpandInFlight = new WeakSet();
+  let autoExpandCount = 0;
   let disableInputViewAutoSet = false;
   let originalAppliedForCalldata = null;
   let originalViewRetryTimer = null;
@@ -300,6 +305,43 @@
     // Require non-zero selector - 0x00000000 is likely raw data, not calldata
     const selector = clean.slice(0, 10);
     return selector !== '0x00000000';
+  }
+
+  function getHexByteLength(hex) {
+    if (typeof hex !== 'string') return 0;
+    const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+    if (!/^[0-9a-fA-F]+$/.test(clean) || clean.length % 2 !== 0) return 0;
+    return clean.length / 2;
+  }
+
+  function shouldAutoExpandCalldata(hex) {
+    if (!couldBeCalldata(hex)) return false;
+    const clean = hex.startsWith('0x') ? hex : '0x' + hex;
+    const byteLen = getHexByteLength(clean);
+    if (!byteLen || byteLen > MAX_AUTO_EXPAND_HEX_BYTES) return false;
+    const selector = clean.slice(0, 10).toLowerCase();
+    if (KNOWN_SELECTORS[selector]) return true;
+    if (byteLen === 4) return true;
+    // Standard ABI calldata is selector + 32-byte words.
+    return byteLen > 4 && (byteLen - 4) % 32 === 0;
+  }
+
+  function shouldAutoExpandRawABI(hex) {
+    const byteLen = getHexByteLength(hex);
+    if (!byteLen || byteLen > MAX_AUTO_EXPAND_HEX_BYTES) return false;
+    return byteLen % 32 === 0;
+  }
+
+  function getNestedDecodeDepth(container) {
+    let depth = 0;
+    let el = container;
+    while (el && el instanceof Element) {
+      if (el.classList && (el.classList.contains('nested-bytes') || el.classList.contains('nested-abi'))) {
+        depth++;
+      }
+      el = el.parentElement;
+    }
+    return depth;
   }
 
   function isHex(value) {
@@ -1571,8 +1613,8 @@
         isBytes: false
       };
     }
-    // Bytes - check if could be nested calldata or raw ABI
-    if (type === 'bytes' || type === 'bytes32') {
+    // Dynamic bytes - check if could be nested calldata or raw ABI
+    if (type === 'bytes') {
       const strVal = String(value);
       const canDecodeCalldata = couldBeCalldata(strVal);
       // Can decode as raw ABI if at least 64 chars (32 bytes = 1 word)
@@ -1622,6 +1664,21 @@
           bytesValue: strVal
         };
       }
+      return {
+        html: `<span class="d-inline-flex align-items-center gap-2" style="flex-wrap:wrap;max-width:100%;">
+          <code style="font-size:12px;" title="${strVal}">${displayVal}</code>
+          <button class="btn btn-sm btn-outline-secondary copy-btn flex-shrink-0" data-copy="${copyId}" style="font-size:11px;padding:2px 6px;" title="Copy">
+            <i class="far fa-copy"></i>
+          </button>
+          <input type="hidden" id="${copyId}" value="${strVal}">
+        </span>`,
+        isBytes: false
+      };
+    }
+    if (type === 'bytes32') {
+      const strVal = String(value);
+      const displayVal = strVal.length > 25 ? strVal.slice(0, 25) + '...' : strVal;
+      const copyId = `copy-${paramId}`;
       return {
         html: `<span class="d-inline-flex align-items-center gap-2" style="flex-wrap:wrap;max-width:100%;">
           <code style="font-size:12px;" title="${strVal}">${displayVal}</code>
@@ -1730,6 +1787,12 @@
     const btn = container.querySelector('.decode-nested-btn');
     const icon = btn?.querySelector('.toggle-icon');
     const decodedDiv = container.querySelector('.nested-decoded');
+    const nestedDepth = getNestedDecodeDepth(container);
+
+    if (nestedDepth > MAX_NESTED_DECODE_DEPTH) {
+      decodedDiv.innerHTML = '<span class="text-warning">Nested decode depth limit reached</span>';
+      return;
+    }
 
     // Toggle if already decoded
     if (decodedDiv.children.length > 0) {
@@ -1780,6 +1843,12 @@
     const btn = container.querySelector('.decode-abi-btn');
     const icon = btn?.querySelector('.toggle-icon');
     const decodedDiv = container.querySelector('.abi-decoded');
+    const nestedDepth = getNestedDecodeDepth(container);
+
+    if (nestedDepth > MAX_NESTED_DECODE_DEPTH) {
+      decodedDiv.innerHTML = '<span class="text-warning">Nested decode depth limit reached</span>';
+      return;
+    }
 
     // Toggle if already decoded
     if (decodedDiv.children.length > 0) {
@@ -1908,6 +1977,12 @@
     for (const nestedContainer of nestedContainers) {
       const decodedDiv = nestedContainer.querySelector('.nested-decoded');
       if (!decodedDiv || decodedDiv.children.length > 0 || autoExpandInFlight.has(nestedContainer)) continue;
+      if (getNestedDecodeDepth(nestedContainer) > MAX_AUTO_EXPAND_DEPTH) continue;
+      if (autoExpandCount >= MAX_AUTO_EXPAND_ITEMS) continue;
+      const calldataId = nestedContainer.getAttribute('data-calldata-id');
+      const calldata = calldataId ? pendingAutoExpand[calldataId] : null;
+      if (!shouldAutoExpandCalldata(calldata)) continue;
+      autoExpandCount++;
       tasks.push(async () => {
         autoExpandInFlight.add(nestedContainer);
         try {
@@ -1923,6 +1998,12 @@
     for (const abiContainer of abiContainers) {
       const decodedDiv = abiContainer.querySelector('.abi-decoded');
       if (!decodedDiv || decodedDiv.children.length > 0 || autoExpandInFlight.has(abiContainer)) continue;
+      if (getNestedDecodeDepth(abiContainer) > MAX_AUTO_EXPAND_DEPTH) continue;
+      if (autoExpandCount >= MAX_AUTO_EXPAND_ITEMS) continue;
+      const abiId = abiContainer.getAttribute('data-abi-id');
+      const data = abiId ? pendingAutoExpand[abiId] : null;
+      if (!shouldAutoExpandRawABI(data)) continue;
+      autoExpandCount++;
       tasks.push(async () => {
         autoExpandInFlight.add(abiContainer);
         try {
@@ -1963,6 +2044,7 @@
         // Attach event listeners
         attachEventListeners(ui);
         // Auto-expand nested decoded sections for full view
+        autoExpandCount = 0;
         await processAutoExpand(ui);
       }
     } catch (e) {

@@ -152,3 +152,23 @@ decode_calldata.js
   - tx-page `Decoded Input` rendering (`decode_calldata.js`)
   - contract panel query/tuple rendering (`content.js`)
 - Nested decode auto-expansion now runs with bounded parallelism (worker pool, concurrency = 5) and in-flight deduplication to reduce waterfall latency and avoid duplicate decode work.
+
+### Nested decode safety limits (stack overflow mitigation)
+
+- Nested tx-page decode auto-expansion now has hard guardrails to avoid browser crashes on deeply nested payloads (notably complex ERC-4337 `handleOps` calldata):
+  - max auto-expand depth
+  - max total auto-expanded nested items per top-level decode
+  - max hex payload size eligible for auto-expand
+  - hard nested decode depth cap (manual + auto)
+- `bytes32` values in decoded params are rendered as fixed hex (copyable) and are no longer treated as nested calldata/ABI candidates.
+  - This avoids false-positive nested decoding on packed fields such as ERC-4337 v0.7 `handleOps` gas/fee packed words.
+- Tradeoff: some very deep/large nested payloads will no longer auto-expand by default, but users can still click to decode nested items until the depth cap is reached.
+
+### Explorer CSP console warning (expected on some pages)
+
+- On some Etherscan-family pages (including Basescan), the extension may log a CSP warning when trying to auto-select the tx input "Original" view:
+  - the page uses inline `onclick` / `javascript:` handlers (e.g. `convertstr2(...)`)
+  - the content script attempts `originalLink.click()`
+  - the page CSP blocks inline script execution
+- This is expected browser behavior and not an extension security issue.
+- Practical impact is limited to the auto-switch convenience; calldata decoding itself should still work.
