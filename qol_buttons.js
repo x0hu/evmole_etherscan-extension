@@ -58,7 +58,7 @@
 
     function findFundedByContainers() {
         const containers = document.querySelectorAll(
-            '#conFundedMainChain, .d-flex.flex-wrap.align-items-center.gap-1'
+            '#conFundedMainChain, .d-flex.align-items-center.gap-1'
         );
 
         return Array.from(containers).filter(isFundedByContainer);
