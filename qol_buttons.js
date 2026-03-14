@@ -30,6 +30,40 @@
         }
     }
 
+    function isAddressValue(value) {
+        return /^0x[a-fA-F0-9]{40}$/.test(String(value || '').trim());
+    }
+
+    function isFundedByContainer(container) {
+        const addressCopyButton = container.querySelector('a[data-clipboard-text]');
+        if (!addressCopyButton || !isAddressValue(addressCopyButton.dataset.clipboardText)) {
+            return false;
+        }
+
+        const hasAddressLink = Array.from(container.querySelectorAll('a[href*="/address/"]')).some(link => {
+            try {
+                const url = new URL(link.href, window.location.origin);
+                return /^\/address\/0x[a-fA-F0-9]{40}$/.test(url.pathname);
+            } catch {
+                return false;
+            }
+        });
+
+        if (!hasAddressLink) {
+            return false;
+        }
+
+        return Array.from(container.querySelectorAll('a[href*="/tx/"]')).some(link => extractTxHashFromHref(link.href));
+    }
+
+    function findFundedByContainers() {
+        const containers = document.querySelectorAll(
+            '#conFundedMainChain, .d-flex.flex-wrap.align-items-center.gap-1'
+        );
+
+        return Array.from(containers).filter(isFundedByContainer);
+    }
+
     function setCopyIconState(icon, copied) {
         if (!icon) return;
 
@@ -84,7 +118,7 @@
     }
 
     function addFundedByTxCopyButtons() {
-        const fundedByContainers = document.querySelectorAll('#conFundedMainChain');
+        const fundedByContainers = findFundedByContainers();
         let buttonAdded = false;
 
         fundedByContainers.forEach(container => {
