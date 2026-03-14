@@ -1,0 +1,5 @@
+section.container-xxl:has(.py-4.noindex-section[data-nosnippet] span#ContentPlaceHolder1_lblAdResult ins[data-revive-id="fb7ca7d4362180864a0c74f8efefe11d"]),
+section.container-xxl:has(.py-4.noindex-section[data-nosnippet] span#ContentPlaceHolder1_lblAdResult ins[data-revive-em9uzwlk="32"]),
+section.container-xxl:has(.py-4.noindex-section[data-nosnippet] span#ContentPlaceHolder1_lblAdResult script[src*="xuv.etherscan.com"]) {
+  display: none !important;
+}

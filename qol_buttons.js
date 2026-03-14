@@ -20,6 +20,95 @@
         return false;
     }
 
+    function extractTxHashFromHref(href) {
+        try {
+            const url = new URL(href, window.location.origin);
+            const match = url.pathname.match(/^\/tx\/(0x[a-fA-F0-9]{64})$/);
+            return match ? match[1] : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function setCopyIconState(icon, copied) {
+        if (!icon) return;
+
+        icon.classList.toggle('fa-copy', !copied);
+        icon.classList.toggle('fa-check', copied);
+
+        if (icon.resetTimer) {
+            clearTimeout(icon.resetTimer);
+        }
+
+        if (copied) {
+            icon.resetTimer = setTimeout(() => {
+                icon.classList.remove('fa-check');
+                icon.classList.add('fa-copy');
+            }, 1500);
+        }
+    }
+
+    function createFundedTxCopyButton(templateButton, txHash) {
+        const button = templateButton ? templateButton.cloneNode(true) : document.createElement('a');
+        button.href = 'javascript:;';
+        button.classList.add('evmole-funded-tx-copy');
+        button.dataset.clipboardText = txHash;
+        button.setAttribute('aria-label', 'Copy Transaction Hash');
+        button.setAttribute('title', 'Copy Transaction Hash');
+        button.removeAttribute('data-hs-clipboard-options');
+
+        let icon = button.querySelector('i');
+        if (!icon) {
+            icon = document.createElement('i');
+            icon.className = 'far fa-copy fa-fw';
+            button.replaceChildren(icon);
+        } else {
+            icon.removeAttribute('id');
+            icon.classList.remove('fa-check');
+            icon.classList.add('fa-copy');
+        }
+
+        button.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            try {
+                await navigator.clipboard.writeText(txHash);
+                setCopyIconState(icon, true);
+            } catch (error) {
+                console.error('Failed to copy transaction hash:', error);
+            }
+        });
+
+        return button;
+    }
+
+    function addFundedByTxCopyButtons() {
+        const fundedByContainers = document.querySelectorAll('#conFundedMainChain');
+        let buttonAdded = false;
+
+        fundedByContainers.forEach(container => {
+            const templateButton = container.querySelector('a[data-clipboard-text]');
+            const txLinks = container.querySelectorAll('a[href*="/tx/"]');
+
+            txLinks.forEach(txLink => {
+                const txHash = extractTxHashFromHref(txLink.href);
+                if (!txHash) return;
+
+                const existingButton = txLink.nextElementSibling;
+                if (existingButton && existingButton.classList.contains('evmole-funded-tx-copy')) {
+                    return;
+                }
+
+                const copyButton = createFundedTxCopyButton(templateButton, txHash);
+                txLink.insertAdjacentElement('afterend', copyButton);
+                buttonAdded = true;
+            });
+        });
+
+        return buttonAdded;
+    }
+
     // Function to get the address dynamically from the URL
     function getAddressFromUrl() {
         const urlParams = new URLSearchParams(window.location.search);
@@ -133,6 +222,20 @@
         }
     }
 
+    function retryFundedByTxCopyButtons() {
+        if (addFundedByTxCopyButtons()) {
+            return;
+        }
+
+        let attempts = 0;
+        const maxAttempts = 50; // 5 seconds total
+        const interval = setInterval(() => {
+            if (addFundedByTxCopyButtons() || ++attempts >= maxAttempts) {
+                clearInterval(interval);
+            }
+        }, 100);
+    }
+
     // Try to add buttons and auto-select 100 immediately
     if (!addQOLButtons()) {
         // If buttons weren't added, keep trying every 100ms for up to 5 seconds
@@ -147,6 +250,8 @@
             }
         }, 100);
     }
+
+    retryFundedByTxCopyButtons();
 
     // Try to auto-select 100 records per page
     if (!autoSelect100()) {
@@ -165,6 +270,8 @@
     // Also listen for page changes (for SPAs)
     let currentUrl = window.location.href;
     const observer = new MutationObserver(() => {
+        addFundedByTxCopyButtons();
+
         if (window.location.href !== currentUrl) {
             currentUrl = window.location.href;
             // Reset the flag and try adding buttons again
@@ -173,6 +280,7 @@
                 if (!window.hasRunQOLButtonScript) {
                     window.hasRunQOLButtonScript = true;
                     addQOLButtons();
+                    retryFundedByTxCopyButtons();
                     autoSelect100();
                 }
             }, 500);
