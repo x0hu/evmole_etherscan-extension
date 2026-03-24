@@ -1197,9 +1197,14 @@
 
   function tryGuessABIStructure(paramData) {
     const hex = paramData.startsWith('0x') ? paramData.slice(2) : paramData;
-    if (hex.length < 64 || hex.length % 64 !== 0) return null;
+    if (hex.length < 64) return null;
 
-    const guessedTypes = guessAbiEncodedData(hex);
+    // Trim to word boundary – some protocols append non-ABI trailing data
+    // (e.g. relay metadata, CREATE2 salts) that breaks alignment checks.
+    const alignedHex = hex.slice(0, Math.floor(hex.length / 64) * 64);
+    if (alignedHex.length < 64) return null;
+
+    const guessedTypes = guessAbiEncodedData(alignedHex);
     if (!guessedTypes || guessedTypes.length === 0) return null;
 
     const types = guessedTypes.map(t => t.format());

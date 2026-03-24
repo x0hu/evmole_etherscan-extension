@@ -164,6 +164,13 @@ decode_calldata.js
   - This avoids false-positive nested decoding on packed fields such as ERC-4337 v0.7 `handleOps` gas/fee packed words.
 - Tradeoff: some very deep/large nested payloads will no longer auto-expand by default, but users can still click to decode nested items until the depth cap is reached.
 
+### ABI guesser trailing-byte tolerance
+
+- `tryGuessABIStructure()` no longer requires param data to be exactly word-aligned (multiple of 32 bytes).
+- Some protocols append non-ABI trailing data after the encoded params (relay metadata, CREATE2 salts, etc.). Previously, any trailing bytes caused the guesser to bail entirely, falling through to the heuristic word-by-word analysis which would misidentify complex tuples as `bytes` blobs.
+- The fix trims to the nearest 32-byte word boundary before running the backtracking DFS guesser, while still using the full original data for value extraction.
+- The guesser's internal logic for distinguishing `bytes` vs tuples vs arrays is unchanged — only the entry gate was relaxed.
+
 ### Explorer CSP console warning (expected on some pages)
 
 - On some Etherscan-family pages (including Basescan), the extension may log a CSP warning when trying to auto-select the tx input "Original" view:
