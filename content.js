@@ -82,6 +82,26 @@ function escapeHtml(str) {
     return `${window.location.origin}/address/${address}`;
   }
 
+  function hasBytecodeCandidateOnPage() {
+    const bytecodeSelectors = [
+      '#verifiedbytecode2',
+      '#verifiedbytecode_convert222',
+      '[id^="verifiedbytecode"]',
+      'pre.text-wrap.scrollbar-custom',
+      'pre.wordwrap.scrollbar-custom',
+      'pre.wordwrap',
+      'pre.scrollbar-custom'
+    ];
+
+    return Array.from(document.querySelectorAll(bytecodeSelectors.join(','))).some(el => {
+      if (el.classList.contains('ace_editor')) return false;
+      if (el.id && el.id.startsWith('editor')) return false;
+
+      const compactText = (el.textContent || '').replace(/\s+/g, '').trim();
+      return /0x[a-fA-F0-9]{100,}/.test(compactText) || /^[a-fA-F0-9]{100,}$/.test(compactText);
+    });
+  }
+
   function splitTrailingUrlPunctuation(url) {
     let core = url;
     let trailing = '';
@@ -150,10 +170,9 @@ function escapeHtml(str) {
 
   function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
-    const bytecodeElements = Array.from(document.querySelectorAll('pre.wordwrap.scrollbar-custom, .wordwrap.scrollbar-custom'));
     const editorElement = document.querySelector('#editor');
 
-    if (bytecodeElements.length === 0 && !editorElement) {
+    if (!hasBytecodeCandidateOnPage() && !editorElement) {
       console.log('No relevant elements found. Panel will not be displayed.');
       return;
     }

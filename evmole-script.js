@@ -621,44 +621,75 @@ async function fetchSignatures(selectors) {
   }
 }
 
-function getBytecodeFromHTML() {
-  // Get all pre elements with wordwrap class (excluding ace editors which contain source code)
-  let bytecodeElements = [
-    ...document.querySelectorAll('pre.wordwrap.scrollbar-custom'),
-    ...document.querySelectorAll('pre.wordwrap')
-  ].filter(el => {
+function normalizeBytecodeText(text) {
+  const compactText = (text || '').replace(/\s+/g, '').trim();
+  if (!compactText) return null;
+
+  const prefixedMatch = compactText.match(/0x[a-fA-F0-9]{100,}/);
+  if (prefixedMatch) {
+    return prefixedMatch[0];
+  }
+
+  if (/^[a-fA-F0-9]{100,}$/.test(compactText)) {
+    return `0x${compactText}`;
+  }
+
+  return null;
+}
+
+function getBytecodeSectionText(element) {
+  const section = element.closest('.mb-10, .card, .card-body, #dividcode') || element.parentElement;
+  return (section?.textContent || element.textContent || '').slice(0, 500);
+}
+
+function getBytecodeCandidateElements() {
+  const selectors = [
+    'pre.text-wrap.scrollbar-custom',
+    'pre.wordwrap.scrollbar-custom',
+    'pre.wordwrap',
+    'pre.scrollbar-custom',
+    '#verifiedbytecode_convert222',
+    '#verifiedbytecode2',
+    '[id^="verifiedbytecode"]'
+  ];
+
+  return Array.from(document.querySelectorAll(selectors.join(','))).filter((el, index, elements) => {
+    if (elements.indexOf(el) !== index) return false;
     if (el.classList.contains('ace_editor')) return false;
     if (el.id && el.id.startsWith('editor')) return false;
     return true;
   });
+}
 
-  // First pass: find Deployed Bytecode (direct text content, no child divs)
-  for (let element of bytecodeElements) {
-    if (element.querySelector('#verifiedbytecode2')) continue;
-    const text = element.textContent.trim();
-    if (text.startsWith('0x') && text.length > 100) {
-      return text;
-    }
+function getBytecodeFromHTML() {
+  const candidates = getBytecodeCandidateElements()
+    .map(element => ({
+      element,
+      bytecode: normalizeBytecodeText(element.textContent),
+      sectionText: getBytecodeSectionText(element)
+    }))
+    .filter(candidate => candidate.bytecode && candidate.bytecode.length > 100);
+
+  // Prefer runtime bytecode over creation code when both are present.
+  const deployedBytecode = candidates.find(candidate => /Deployed Bytecode/i.test(candidate.sectionText));
+  if (deployedBytecode) {
+    return deployedBytecode.bytecode;
   }
 
-  // Second pass: fall back to Creation Code
-  const verifiedBytecode = document.querySelector('#verifiedbytecode2');
-  if (verifiedBytecode) {
-    const text = verifiedBytecode.textContent.trim();
-    if (text.startsWith('0x') && text.length > 100) {
-      return text;
-    }
+  const convertedBytecode = candidates.find(candidate => candidate.element.id === 'verifiedbytecode_convert222');
+  if (convertedBytecode) {
+    return convertedBytecode.bytecode;
   }
 
-  // Last fallback: unverified contracts
-  for (let element of bytecodeElements) {
-    const text = element.textContent.trim();
-    if (text.startsWith('0x') && text.length > 100) {
-      return text;
-    }
+  const prefixedPreBytecode = candidates.find(candidate =>
+    candidate.element.tagName.toLowerCase() === 'pre' &&
+    (candidate.element.textContent || '').trim().startsWith('0x')
+  );
+  if (prefixedPreBytecode) {
+    return prefixedPreBytecode.bytecode;
   }
 
-  return null;
+  return candidates[0]?.bytecode || null;
 }
 
 async function extractFunctions() {
