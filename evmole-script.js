@@ -70,6 +70,9 @@ const RPC_COOLDOWN_429_MS = 2 * 60 * 1000;
 const RPC_COOLDOWN_403_MS = 10 * 60 * 1000;
 const RPC_COOLDOWN_NETWORK_MS = 30 * 1000;
 const rpcCooldownUntil = new Map();
+const addressCodeLookupCache = new Map();
+const UINT64_MAX = BigInt('0xffffffffffffffff');
+const UINT160_MAX = BigInt('0xffffffffffffffffffffffffffffffffffffffff');
 
 function getChainConfig() {
   const host = window.location.hostname;
@@ -250,6 +253,32 @@ async function hedgedGetCode(address, { maxRpcs = 2, staggerMs = 120 } = {}) {
   return { code, rpc: winner.rpc };
 }
 
+function getAddressCandidateFromWord(chunk) {
+  if (typeof chunk !== 'string' || chunk.length !== 64) return null;
+  if (!chunk.startsWith('0'.repeat(24))) return null;
+
+  const value = BigInt('0x' + chunk);
+  if (value <= UINT64_MAX || value > UINT160_MAX) return null;
+
+  return '0x' + chunk.slice(24);
+}
+
+async function addressHasContractCode(address) {
+  const normalized = String(address || '').toLowerCase();
+  if (!/^0x[a-f0-9]{40}$/.test(normalized) || normalized === '0x' + '0'.repeat(40)) {
+    return false;
+  }
+
+  if (!addressCodeLookupCache.has(normalized)) {
+    const lookup = hedgedGetCode(normalized, { maxRpcs: 2, staggerMs: 100 })
+      .then(({ code }) => code !== '0x' && !/^0x0*$/i.test(code))
+      .catch(() => false);
+    addressCodeLookupCache.set(normalized, lookup);
+  }
+
+  return addressCodeLookupCache.get(normalized);
+}
+
 async function hedgedGetStorageAt(address, slot, { maxRpcs = 2, staggerMs = 120 } = {}) {
   const winner = await hedgedRpcRequest('eth_getStorageAt', [address, slot, 'latest'], { maxRpcs, staggerMs });
   const value = winner.result;
@@ -345,7 +374,7 @@ async function getImplementationBytecode(address, proxyBytecode) {
   return null;
 }
 
-function decodeSingleWordResult(hexData, fnName) {
+async function decodeSingleWordResult(hexData, fnName) {
   const chunk = hexData.slice(2);
   if (chunk.length !== 64) return hexData;
 
@@ -357,7 +386,7 @@ function decodeSingleWordResult(hexData, fnName) {
   }
 
   // ABI-encoded address is left-padded to 32 bytes (12 leading zero bytes).
-  const isAddressShaped = chunk.startsWith('0'.repeat(24)) && value !== 0n;
+  const addressCandidate = getAddressCandidateFromWord(chunk);
   const strongAddressNameHint = ['owner', 'admin', 'implementation', 'beacon'].includes(name)
     || name.includes('address')
     || name.includes('owner')
@@ -372,8 +401,12 @@ function decodeSingleWordResult(hexData, fnName) {
     || name.includes('controller')
     || name.includes('recipient')
     || name.includes('receiver');
-  if (isAddressShaped && strongAddressNameHint) {
-    return '0x' + chunk.slice(24);
+  if (addressCandidate && strongAddressNameHint) {
+    return addressCandidate;
+  }
+
+  if (addressCandidate && await addressHasContractCode(addressCandidate)) {
+    return addressCandidate;
   }
 
   return value.toString();
@@ -459,7 +492,7 @@ async function queryReadFunction(selector, signature, contractAddress) {
     }
 
     if (dataLen === 32) {
-      return { success: true, result: decodeSingleWordResult(rawResult.data, fnName) };
+      return { success: true, result: await decodeSingleWordResult(rawResult.data, fnName) };
     }
 
     // Fallback to raw hex
@@ -482,13 +515,10 @@ function decodeTupleResult(hexData) {
   // Decode each 32-byte chunk as decimal (default)
   const results = chunks.map(chunk => {
     const value = BigInt('0x' + chunk);
+    const addressCandidate = getAddressCandidateFromWord(chunk);
 
-    const isLikelyAddress = chunk.startsWith('000000000000000000000000')
-      && value > BigInt('0xffffffffffffffff')
-      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff');
-
-    if (isLikelyAddress) {
-      return '0x' + chunk.slice(24);
+    if (addressCandidate) {
+      return addressCandidate;
     }
 
     return value.toString();
@@ -507,10 +537,8 @@ function formatTupleChunks(chunks, mode) {
   // dec (default)
   return chunks.map(chunk => {
     const value = BigInt('0x' + chunk);
-    const isLikelyAddress = chunk.startsWith('000000000000000000000000')
-      && value > BigInt('0xffffffffffffffff')
-      && value < BigInt('0xffffffffffffffffffffffffffffffffffffffff');
-    if (isLikelyAddress) return '0x' + chunk.slice(24);
+    const addressCandidate = getAddressCandidateFromWord(chunk);
+    if (addressCandidate) return addressCandidate;
     return value.toString();
   }).join(', ');
 }
@@ -559,8 +587,9 @@ function autoDecodeTuple(chunks) {
       entries.push({ idx: idx++, type: 'bool', value: value === 0n ? 'false' : 'true' });
       continue;
     }
-    if (chunk.startsWith('000000000000000000000000') && value > BigInt('0xffffffffffffffff')) {
-      entries.push({ idx: idx++, type: 'addr', value: '0x' + chunk.slice(24) });
+    const addressCandidate = getAddressCandidateFromWord(chunk);
+    if (addressCandidate) {
+      entries.push({ idx: idx++, type: 'addr', value: addressCandidate });
       continue;
     }
     const usedBytes = Math.ceil(chunk.replace(/^0+/, '').length / 2);
@@ -575,11 +604,12 @@ function autoDecodeTuple(chunks) {
 
 window.addEventListener('message', async (event) => {
   if (event.data?.type === 'QUERY_READ_FUNCTION') {
-    const { selector, signature, contractAddress } = event.data;
+    const { selector, signature, contractAddress, purpose } = event.data;
     const result = await queryReadFunction(selector, signature, contractAddress);
     window.postMessage({
       type: 'QUERY_RESULT',
       selector,
+      purpose,
       ...result
     }, '*');
   }

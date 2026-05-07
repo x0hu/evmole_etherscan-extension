@@ -12,11 +12,261 @@ function escapeHtml(str) {
     script.setAttribute('src', chrome.runtime.getURL(file));
     node.appendChild(script);
   }
+
+  function normalizeSourceUrl(rawUrl) {
+    const normalized = String(rawUrl || '')
+      .replace(/\\\//g, '/')
+      .replace(/\u00a0/g, ' ')
+      .trim();
+    if (!normalized) return null;
+
+    const { core } = splitTrailingUrlPunctuation(normalized);
+    if (!/^https?:\/\//i.test(core)) return null;
+
+    try {
+      new URL(core);
+      return core;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function isReferenceSourceUrl(url) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (e) {
+      return false;
+    }
+
+    const hostname = parsedUrl.hostname.replace(/^www\./i, '').toLowerCase();
+    const pathname = parsedUrl.pathname.toLowerCase();
+    const referenceHosts = new Set([
+      'cs.stackexchange.com',
+      'blog.openzeppelin.com',
+      'consensys.net',
+      'datatracker.ietf.org',
+      'docs.ethers.io',
+      'docs.metamask.io',
+      'docs.soliditylang.org',
+      'developer.mozilla.org',
+      'eips.ethereum.org',
+      'eth.wiki',
+      'ethereum.github.io',
+      'forum.openzeppelin.com',
+      'notes.ethereum.org',
+      'rfc-editor.org',
+      'solidity.readthedocs.io',
+      'web3js.readthedocs.io',
+      'w3.org',
+      'xn--2-umb.com'
+    ]);
+
+    if (referenceHosts.has(hostname)) return true;
+
+    if (hostname === 'github.com') {
+      const referenceGithubPathPrefixes = [
+        '/ethereum/eips',
+        '/openzeppelin/openzeppelin-contracts',
+        '/transmissions11/solmate',
+        '/vectorized/solady',
+        '/uniswap/permit2',
+        '/brechtpd/base64'
+      ];
+      return referenceGithubPathPrefixes.some(prefix => pathname.startsWith(prefix));
+    }
+
+    if (hostname === 'etherscan.io') {
+      return pathname.startsWith('/address/');
+    }
+
+    return false;
+  }
+
+  function normalizeDiscoveredLink(rawLink) {
+    const normalized = String(rawLink || '')
+      .replace(/\\\//g, '/')
+      .replace(/\u00a0/g, ' ')
+      .trim();
+    if (!normalized) return null;
+
+    if (/^https?:\/\//i.test(normalized)) {
+      return normalizeSourceUrl(normalized);
+    }
+
+    if (/^ipfs:\/\//i.test(normalized)) {
+      const { core } = splitTrailingUrlPunctuation(normalized);
+      const rawIpfsPath = core.replace(/^ipfs:\/\//i, '').replace(/^\/+/, '').replace(/^ipfs\//i, '');
+      const ipfsPath = rawIpfsPath.match(/^[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/)?.[0] || '';
+      const cid = ipfsPath.split(/[/?#]/)[0];
+      const isValidCidLike = /^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ky][a-z2-7]{20,})$/i.test(cid);
+      return isValidCidLike ? `ipfs://${ipfsPath}` : null;
+    }
+
+    const cidMatch = normalized.match(/^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ky][a-z2-7]{20,})$/i);
+    return cidMatch ? cidMatch[0] : null;
+  }
+
+  function addUniqueLinks(target, foundLinks) {
+    foundLinks.forEach(rawLink => {
+      const link = normalizeDiscoveredLink(rawLink);
+      if (!link) return;
+      if (/^https?:\/\//i.test(link) && isReferenceSourceUrl(link)) return;
+      if (!target.includes(link)) target.push(link);
+    });
+  }
+
+  function extractLinksFromText(text) {
+    const normalizedText = String(text || '')
+      .replace(/\\\//g, '/')
+      .replace(/\u00a0/g, ' ')
+      .replace(/(https?:\/\/|ipfs:\/\/)/gi, '\n$1');
+    const tokenRegex = /https?:\/\/[^\s<>"'`*\\[\]]+|ipfs:\/\/[^\s<>"'`*\\[\]]+|\b(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ky][a-z2-7]{20,})\b/gi;
+    const links = [];
+    let match;
+
+    while ((match = tokenRegex.exec(normalizedText)) !== null) {
+      addUniqueLinks(links, [match[0]]);
+    }
+
+    return links;
+  }
+
+  function getDiscoveredLinkHref(link) {
+    if (/^ipfs:\/\//i.test(link)) {
+      return toIpfsGatewayUrl(link) || link;
+    }
+
+    if (/^(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|baf[ky][a-z2-7]{20,})$/i.test(link)) {
+      return `https://ipfs.io/ipfs/${link}`;
+    }
+
+    return link;
+  }
+
+  function extractLinksFromResultValue(value) {
+    if (Array.isArray(value)) {
+      return value.flatMap(entry => extractLinksFromResultValue(entry?.value ?? entry));
+    }
+
+    if (value && typeof value === 'object') {
+      return extractLinksFromText(JSON.stringify(value));
+    }
+
+    return extractLinksFromText(value);
+  }
+
+  function getContractSourceLinks() {
+    const links = [];
+
+    const sourceRoot = document.querySelector('#subcontract_sourcecode, #code, #dividcode') || document;
+    const detectedLinks = Array.from(sourceRoot.querySelectorAll('.detected-link'))
+      .map(el => normalizeDiscoveredLink(el.textContent))
+      .filter(Boolean);
+    addUniqueLinks(links, detectedLinks);
+
+    if (links.length > 0) {
+      return links;
+    }
+
+    const sourceLines = Array.from(sourceRoot.querySelectorAll('.view-line'))
+      .map(line => line.textContent || '')
+      .join('\n');
+    addUniqueLinks(links, extractLinksFromText(sourceLines));
+
+    if (links.length > 0) {
+      return links;
+    }
+
+    const sourceTextSelectors = [
+      '#subcontract_sourcecode',
+      '[id^="editor-"]',
+      '.editor-area',
+      '.view-lines',
+      '#code'
+    ];
+    const sourceText = Array.from(document.querySelectorAll(sourceTextSelectors.join(',')))
+      .map(el => el.textContent || '')
+      .join('\n');
+    addUniqueLinks(links, extractLinksFromText(sourceText));
+
+    if (links.length > 0) {
+      return links;
+    }
+
+    const contractJsonScript = Array.from(document.scripts)
+      .map(script => script.textContent || '')
+      .find(text => text.includes('editor_contractJsonData'));
+    if (contractJsonScript) {
+      const match = contractJsonScript.match(/editor_contractJsonData\s*=\s*'([\s\S]*?)';/);
+      if (match) {
+        const unescapedJsonText = match[1]
+          .replace(/\\\//g, '/')
+          .replace(/\\n/g, '\n')
+          .replace(/\\"/g, '"');
+        addUniqueLinks(links, extractLinksFromText(unescapedJsonText));
+      }
+    }
+
+    return links;
+  }
+
+  function renderLinksPanelContent(links) {
+    return `<h3>Links Found</h3>
+      <div class="source-link-list">
+        ${links.map(url => `
+          <a class="source-link-item" href="${escapeHtml(getDiscoveredLinkHref(url))}" target="_blank" rel="noopener noreferrer">
+            ${escapeHtml(url)}
+          </a>
+        `).join('')}
+      </div>`;
+  }
+
+  function createLinksPanel(links) {
+    const panel = document.createElement('div');
+    panel.className = 'evmole-links-panel';
+    panel.innerHTML = renderLinksPanelContent(links);
+    panel.dataset.links = JSON.stringify(links);
+    return panel;
+  }
   
   function createRightPanel(content) {
     // Container: fixed on right edge, holds panel + tab
     const container = document.createElement('div');
     container.className = 'evmole-container';
+
+    let linksPanel = null;
+    const readFunctionLinks = [];
+
+    const getAllLinks = () => {
+      const links = getContractSourceLinks();
+      addUniqueLinks(links, readFunctionLinks);
+      return links;
+    };
+
+    const updateLinksPanel = () => {
+      const links = getAllLinks();
+      if (links.length === 0) return;
+
+      const serializedLinks = JSON.stringify(links);
+      if (linksPanel && linksPanel.dataset.links === serializedLinks) return;
+
+      if (!linksPanel) {
+        linksPanel = createLinksPanel(links);
+        container.insertBefore(linksPanel, panel);
+      } else {
+        linksPanel.innerHTML = renderLinksPanelContent(links);
+        linksPanel.dataset.links = serializedLinks;
+      }
+    };
+
+    const addReadFunctionLinks = foundLinks => {
+      const beforeCount = readFunctionLinks.length;
+      addUniqueLinks(readFunctionLinks, foundLinks);
+      if (readFunctionLinks.length !== beforeCount) {
+        updateLinksPanel();
+      }
+    };
 
     // Panel (top)
     const panel = document.createElement('div');
@@ -30,6 +280,8 @@ function escapeHtml(str) {
 
     const contentDiv = document.createElement('div');
     contentDiv.innerHTML = content;
+    contentDiv.addDiscoveredLinks = addReadFunctionLinks;
+    contentDiv.refreshLinksPanel = updateLinksPanel;
     panel.appendChild(contentDiv);
 
     const closeButton = document.createElement('button');
@@ -41,6 +293,7 @@ function escapeHtml(str) {
     panel.appendChild(closeButton);
 
     container.appendChild(panel);
+    updateLinksPanel();
 
     // Bottom tab toggle
     const tab = document.createElement('div');
@@ -62,6 +315,23 @@ function escapeHtml(str) {
     container.appendChild(tab);
 
     document.body.appendChild(container);
+
+    let linkRefreshCount = 0;
+    const linkRefreshTimer = setInterval(() => {
+      if (!document.body.contains(container) || linkRefreshCount >= 10) {
+        clearInterval(linkRefreshTimer);
+        return;
+      }
+      updateLinksPanel();
+      linkRefreshCount += 1;
+    }, 1000);
+
+    const originalCloseClick = closeButton.onclick;
+    closeButton.onclick = function() {
+      clearInterval(linkRefreshTimer);
+      originalCloseClick.call(this);
+    };
+
     return contentDiv;
   }
   
@@ -100,6 +370,17 @@ function escapeHtml(str) {
       const compactText = (el.textContent || '').replace(/\s+/g, '').trim();
       return /0x[a-fA-F0-9]{100,}/.test(compactText) || /^[a-fA-F0-9]{100,}$/.test(compactText);
     });
+  }
+
+  function hasContractCodeCandidateOnPage() {
+    if (!getContractAddress()) return false;
+
+    const codeRoot = document.querySelector('#code, #contracts, #ContentPlaceHolder1_contractCodeDiv');
+    if (!codeRoot) return false;
+
+    const codeText = codeRoot.textContent || '';
+    return /Contract Source Code|Minimal Proxy Contract|Read Contract as Proxy|Write Contract as Proxy/i.test(codeText) ||
+      !!document.querySelector('#subcontract_sourcecode');
   }
 
   function splitTrailingUrlPunctuation(url) {
@@ -172,7 +453,7 @@ function escapeHtml(str) {
     // Check if relevant elements exist before creating the panel
     const editorElement = document.querySelector('#editor');
 
-    if (!hasBytecodeCandidateOnPage() && !editorElement) {
+    if (!hasBytecodeCandidateOnPage() && !hasContractCodeCandidateOnPage() && !editorElement) {
       console.log('No relevant elements found. Panel will not be displayed.');
       return;
     }
@@ -199,6 +480,59 @@ function escapeHtml(str) {
     ];
 
     const contractAddress = getContractAddress();
+    const linkScanRequestedSelectors = new Set();
+
+    function isLikelyLinkReadFunction(signature) {
+      const fnName = String(signature || '').split('(')[0].toLowerCase();
+      const linkFunctionNames = new Set([
+        'baseuri',
+        'contracturi',
+        'externalurl',
+        'external_url',
+        'image',
+        'imageuri',
+        'metadata',
+        'metadatauri',
+        'tokenuri',
+        'uri',
+        'website',
+        'web',
+        'site',
+        'telegram',
+        'twitter',
+        'x'
+      ]);
+
+      return linkFunctionNames.has(fnName) ||
+        fnName.includes('uri') ||
+        fnName.includes('url') ||
+        fnName.includes('ipfs');
+    }
+
+    function queueReadFunctionLinkScan() {
+      const candidates = Array.from(panel.querySelectorAll('.selector-item.queryable'))
+        .filter(item => {
+          const selector = item.dataset.selector;
+          const signature = item.dataset.signature;
+          if (!selector || !signature || linkScanRequestedSelectors.has(selector)) return false;
+          return isLikelyLinkReadFunction(signature);
+        })
+        .slice(0, 8);
+
+      candidates.forEach((item, index) => {
+        linkScanRequestedSelectors.add(item.dataset.selector);
+        setTimeout(() => {
+          if (!panel.isConnected) return;
+          window.postMessage({
+            type: 'QUERY_READ_FUNCTION',
+            purpose: 'LINK_SCAN',
+            selector: item.dataset.selector,
+            signature: item.dataset.signature,
+            contractAddress
+          }, '*');
+        }, 600 + (index * 700));
+      });
+    }
 
     const messageHandler = function(event) {
       if (event.data && event.data.type === 'FUNCTION_SELECTORS_RESULT') {
@@ -316,6 +650,8 @@ function escapeHtml(str) {
                 el.textContent = el.textContent.replace(/\(.*\)/, '()');
               });
             }
+
+            queueReadFunctionLinkScan();
           }
         } else if (panel && panel.parentNode) {
           const errorMsg = event.data.error || 'No function selectors found';
@@ -325,7 +661,12 @@ function escapeHtml(str) {
 
       // Handle query results
       if (event.data && event.data.type === 'QUERY_RESULT') {
-        const { selector, success, result, error, rawChunks } = event.data;
+        const { selector, success, result, error, rawChunks, purpose } = event.data;
+        if (success) {
+          panel.addDiscoveredLinks?.(extractLinksFromResultValue(result));
+        }
+        if (purpose === 'LINK_SCAN') return;
+
         const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
         if (item) {
           const resultDiv = item.querySelector('.query-result');
@@ -450,6 +791,7 @@ function escapeHtml(str) {
       // Handle tuple format toggle results
       if (event.data && event.data.type === 'FORMAT_TUPLE_RESULT') {
         const { selector, formatted, mode } = event.data;
+        panel.addDiscoveredLinks?.(extractLinksFromResultValue(formatted));
         const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
         if (item) {
           const resultDiv = item.querySelector('.query-result');
