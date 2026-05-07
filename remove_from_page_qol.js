@@ -1,4 +1,5 @@
 const TARGET_PAGE_PATH = /^\/(?:address|tx)(?:\/|$)/;
+const TARGET_TX_PAGE_PATH = /^\/tx(?:\/|$)/;
 const FEATURED_BANNER_SELECTOR = 'section.container-xxl';
 const FEATURED_BANNER_RESULT_SELECTOR = '.py-4.noindex-section[data-nosnippet] span#ContentPlaceHolder1_lblAdResult';
 const FEATURED_BANNER_REVIVE_MARKERS = [
@@ -8,6 +9,8 @@ const FEATURED_BANNER_REVIVE_MARKERS = [
 ];
 const FEATURED_BANNER_REVIVE_SELECTOR = FEATURED_BANNER_REVIVE_MARKERS.join(', ');
 const SPONSORED_DROPDOWN_ROW_SELECTOR = 'div.d-flex.gap-2.noindex-section[data-nosnippet]';
+const SPONSORED_COMMENT_START = 'Sponsored';
+const SPONSORED_COMMENT_END = 'End Sponsored';
 
 const PAGE_REMOVAL_RULES = [
   {
@@ -84,6 +87,51 @@ function normalizeText(text) {
   return String(text ?? '').replace(/\s+/g, ' ').trim();
 }
 
+function isCommentWithText(node, text) {
+  return node?.nodeType === Node.COMMENT_NODE && normalizeText(node.nodeValue) === text;
+}
+
+function removeTxSponsoredCommentBlocks(root) {
+  const sponsoredStartComments = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT);
+  let node = walker.nextNode();
+
+  while (node) {
+    if (isCommentWithText(node, SPONSORED_COMMENT_START)) {
+      sponsoredStartComments.push(node);
+    }
+
+    node = walker.nextNode();
+  }
+
+  sponsoredStartComments.forEach(removeSponsoredCommentBlock);
+}
+
+function removeSponsoredCommentBlock(startComment) {
+  const nodesToRemove = [];
+  let node = startComment.nextSibling;
+  let foundEndComment = false;
+
+  while (node) {
+    const nextNode = node.nextSibling;
+    nodesToRemove.push(node);
+
+    if (isCommentWithText(node, SPONSORED_COMMENT_END)) {
+      foundEndComment = true;
+      break;
+    }
+
+    node = nextNode;
+  }
+
+  if (!foundEndComment) {
+    return;
+  }
+
+  startComment.remove();
+  nodesToRemove.forEach((nodeToRemove) => nodeToRemove.remove());
+}
+
 function getMatchingNodes(root, selector) {
   if (root.nodeType === Node.DOCUMENT_NODE) {
     return Array.from(root.querySelectorAll(selector));
@@ -97,7 +145,7 @@ function getMatchingNodes(root, selector) {
   return matches.concat(Array.from(root.querySelectorAll(selector)));
 }
 
-function removePageQolElements(root) {
+function removeRuleBasedPageQolElements(root) {
   PAGE_REMOVAL_RULES.forEach((rule) => {
     getMatchingNodes(root, rule.containerSelector).forEach((node) => {
       if (rule.matches(node)) {
@@ -107,12 +155,24 @@ function removePageQolElements(root) {
   });
 }
 
+function removePageQolElements(root) {
+  removeRuleBasedPageQolElements(root);
+
+  if (TARGET_TX_PAGE_PATH.test(window.location.pathname)) {
+    removeTxSponsoredCommentBlocks(document);
+  }
+}
+
 function watchForPageQolCleanup() {
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {
-        removePageQolElements(node);
+        removeRuleBasedPageQolElements(node);
       }
+    }
+
+    if (TARGET_TX_PAGE_PATH.test(window.location.pathname)) {
+      removeTxSponsoredCommentBlocks(document);
     }
   });
 
