@@ -4,6 +4,12 @@
   "version": "1.0",
   "description": "Displays function selectors for Ethereum contracts on Etherscan",
   "permissions": ["activeTab"],
+  "host_permissions": [
+    "https://bridge-fetchagg.vercel.app/*"
+  ],
+  "background": {
+    "service_worker": "bridge-origin/background.js"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -112,7 +118,13 @@
         "https://mega.etherscan.io/tx/*",
         "https://mega.etherscan.io/txs*"
       ],
-      "js": ["content.js", "etherscan_contract_info.js", "qol_buttons.js"]
+      "js": [
+        "content.js",
+        "etherscan_contract_info.js",
+        "qol_buttons.js",
+        "bridge-origin/chain-explorers.js",
+        "bridge-origin/funded-origin.js"
+      ]
     },
     {
       "matches": [

@@ -84,7 +84,7 @@
 
     function createFundedTxCopyButton(templateButton, txHash) {
         const button = templateButton ? templateButton.cloneNode(true) : document.createElement('a');
-        button.href = 'javascript:;';
+        button.href = '#';
         button.classList.add('evmole-funded-tx-copy');
         button.dataset.clipboardText = txHash;
         button.setAttribute('aria-label', 'Copy Transaction Hash');
