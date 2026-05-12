@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Evmole Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header>
+        <div>
+          <h1>Evmole Settings</h1>
+          <p>Choose how contract function panels open by default.</p>
+        </div>
+      </header>
+
+      <section class="setting-row" aria-labelledby="function-panel-default-label">
+        <div>
+          <h2 id="function-panel-default-label">Contract functions default</h2>
+          <p>New contract pages will open the function panel in this state.</p>
+        </div>
+
+        <fieldset class="segmented-control">
+          <legend class="sr-only">Contract functions default state</legend>
+          <label>
+            <input type="radio" name="contractFunctionsDefault" value="collapsed">
+            <span>Collapsed</span>
+          </label>
+          <label>
+            <input type="radio" name="contractFunctionsDefault" value="expanded">
+            <span>Expanded</span>
+          </label>
+        </fieldset>
+      </section>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

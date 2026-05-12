@@ -349,7 +349,13 @@
 .query-result .unit-toggle {
   flex-shrink: 0;
   margin-left: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
   color: #95a5a6;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
 }
 
 .query-result .js-clipboard:hover,
@@ -383,11 +389,17 @@
 
 .unit-option {
   display: block;
+  width: 100%;
   padding: 4px 10px;
+  border: 0;
+  background: none;
   color: #bdc3c7;
   text-decoration: none;
   font-size: 11px;
+  font-family: inherit;
+  text-align: left;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .unit-option:hover {
@@ -435,12 +447,16 @@
 }
 
 .fmt-option {
+  margin: 0;
   padding: 1px 6px;
+  border: 0;
+  background: none;
   color: #95a5a6;
   text-decoration: none;
   font-size: 10px;
   font-family: system-ui, sans-serif;
   border-right: 1px solid #2d2f31;
+  line-height: inherit;
   cursor: pointer;
 }
 

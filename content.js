@@ -13,6 +13,28 @@ function escapeHtml(str) {
     node.appendChild(script);
   }
 
+  const DEFAULT_SETTINGS = {
+    contractFunctionsDefaultCollapsed: true
+  };
+
+  function getExtensionSettings() {
+    return new Promise(resolve => {
+      if (typeof chrome === 'undefined' || !chrome.storage?.sync) {
+        resolve({ ...DEFAULT_SETTINGS });
+        return;
+      }
+
+      chrome.storage.sync.get(DEFAULT_SETTINGS, settings => {
+        if (chrome.runtime.lastError) {
+          resolve({ ...DEFAULT_SETTINGS });
+          return;
+        }
+
+        resolve(settings);
+      });
+    });
+  }
+
   function normalizeSourceUrl(rawUrl) {
     const normalized = String(rawUrl || '')
       .replace(/\\\//g, '/')
@@ -63,10 +85,16 @@ function escapeHtml(str) {
     ]);
 
     if (referenceHosts.has(hostname)) return true;
+    if (hostname === 'wikipedia.org' || hostname.endsWith('.wikipedia.org')) return true;
+
+    if (hostname === 'ethereum.org') {
+      return /^\/(?:[a-z-]+\/)?developers\/docs\//.test(pathname);
+    }
 
     if (hostname === 'github.com') {
       const referenceGithubPathPrefixes = [
         '/ethereum/eips',
+        '/ethereum/solidity',
         '/openzeppelin/openzeppelin-contracts',
         '/transmissions11/solmate',
         '/vectorized/solady',
@@ -230,7 +258,17 @@ function escapeHtml(str) {
     return panel;
   }
   
-  function createRightPanel(content) {
+  function setPanelCollapsedState(panel, tab, collapsed) {
+    panel.classList.toggle('collapsed', collapsed);
+    tab.textContent = collapsed ? '\u25C0 Contract Functions' : 'Contract Functions \u25B6';
+
+    panel.querySelectorAll('.function-name').forEach(el => {
+      if (!el.dataset.full) el.dataset.full = el.textContent;
+      el.textContent = collapsed ? el.dataset.full.replace(/\(.*\)/, '()') : el.dataset.full;
+    });
+  }
+
+  function createRightPanel(content, { defaultCollapsed = true } = {}) {
     // Container: fixed on right edge, holds panel + tab
     const container = document.createElement('div');
     container.className = 'evmole-container';
@@ -270,7 +308,7 @@ function escapeHtml(str) {
 
     // Panel (top)
     const panel = document.createElement('div');
-    panel.className = 'evmole-panel collapsed';
+    panel.className = defaultCollapsed ? 'evmole-panel collapsed' : 'evmole-panel';
 
     const title = document.createElement('h3');
     title.textContent = 'Contract Functions';
@@ -298,19 +336,10 @@ function escapeHtml(str) {
     // Bottom tab toggle
     const tab = document.createElement('div');
     tab.className = 'evmole-tab';
-    tab.textContent = '\u25C0 Contract Functions';
+    tab.textContent = defaultCollapsed ? '\u25C0 Contract Functions' : 'Contract Functions \u25B6';
     tab.addEventListener('click', () => {
       const collapsed = panel.classList.toggle('collapsed');
-      tab.textContent = collapsed ? '\u25C0 Contract Functions' : 'Contract Functions \u25B6';
-      // Strip/restore args in function names
-      panel.querySelectorAll('.function-name').forEach(el => {
-        if (collapsed) {
-          if (!el.dataset.full) el.dataset.full = el.textContent;
-          el.textContent = el.dataset.full.replace(/\(.*\)/, '()');
-        } else if (el.dataset.full) {
-          el.textContent = el.dataset.full;
-        }
-      });
+      setPanelCollapsedState(panel, tab, collapsed);
     });
     container.appendChild(tab);
 
@@ -449,7 +478,7 @@ function escapeHtml(str) {
     return renderInlineLinks(value, { addressLinks: true });
   }
 
-  function displayFunctionSelectors() {
+  async function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
     const editorElement = document.querySelector('#editor');
 
@@ -458,7 +487,10 @@ function escapeHtml(str) {
       return;
     }
 
-    const panel = createRightPanel('<div id="selectors">Loading...</div>');
+    const settings = await getExtensionSettings();
+    const panel = createRightPanel('<div id="selectors">Loading...</div>', {
+      defaultCollapsed: settings.contractFunctionsDefaultCollapsed
+    });
     
     injectScript('evmole-script.js', document.head || document.documentElement);
     injectStyles('styles.css');
@@ -512,10 +544,13 @@ function escapeHtml(str) {
       const linkFunctionNames = new Set([
         'baseuri',
         'contracturi',
+        'context',
+        'data',
         'externalurl',
         'external_url',
         'image',
         'imageuri',
+        'alldata',
         'metadata',
         'metadatauri',
         'tokenuri',
@@ -529,6 +564,8 @@ function escapeHtml(str) {
       ]);
 
       return linkFunctionNames.has(fnName) ||
+        fnName.endsWith('data') ||
+        fnName.includes('context') ||
         fnName.includes('uri') ||
         fnName.includes('url') ||
         fnName.includes('ipfs');
@@ -539,10 +576,9 @@ function escapeHtml(str) {
         .filter(item => {
           const selector = item.dataset.selector;
           const signature = item.dataset.signature;
-          if (!selector || !signature || linkScanRequestedSelectors.has(selector)) return false;
-          return isLikelyLinkReadFunction(signature);
+          return selector && signature && !linkScanRequestedSelectors.has(selector);
         })
-        .slice(0, 8);
+        .sort((a, b) => Number(isLikelyLinkReadFunction(b.dataset.signature)) - Number(isLikelyLinkReadFunction(a.dataset.signature)));
 
       candidates.forEach((item, index) => {
         linkScanRequestedSelectors.add(item.dataset.selector);
@@ -555,7 +591,7 @@ function escapeHtml(str) {
             signature: item.dataset.signature,
             contractAddress
           }, '*');
-        }, 600 + (index * 700));
+        }, 250 + (index * 250));
       });
     }
 
@@ -687,9 +723,10 @@ function escapeHtml(str) {
 
       // Handle query results
       if (event.data && event.data.type === 'QUERY_RESULT') {
-        const { selector, success, result, error, rawChunks, purpose } = event.data;
+        const { selector, success, result, error, rawChunks, purpose, linkScanValue } = event.data;
         if (success) {
           panel.addDiscoveredLinks?.(extractLinksFromResultValue(result));
+          panel.addDiscoveredLinks?.(extractLinksFromResultValue(linkScanValue));
         }
         if (purpose === 'LINK_SCAN') return;
 
@@ -706,26 +743,26 @@ function escapeHtml(str) {
             if (isTuple) {
               controls = `
                 <div class="format-toggle">
-                  <a href="javascript:;" data-mode="dec" class="fmt-option">Dec</a>
-                  <a href="javascript:;" data-mode="hex" class="fmt-option">Hex</a>
-                  <a href="javascript:;" data-mode="auto" class="fmt-option active">Auto</a>
+                  <button type="button" data-mode="dec" class="fmt-option">Dec</button>
+                  <button type="button" data-mode="hex" class="fmt-option">Hex</button>
+                  <button type="button" data-mode="auto" class="fmt-option active">Auto</button>
                 </div>`;
             } else if (isNumeric) {
               controls = `
                 <div class="unit-dropdown">
-                  <a class="link-secondary unit-toggle" href="javascript:;" title="Convert units"><i class="fas fa-exchange-alt fa-fw"></i></a>
+                  <button type="button" class="link-secondary unit-toggle" title="Convert units" aria-label="Convert units"><i class="fas fa-exchange-alt fa-fw"></i></button>
                   <div class="unit-menu">
-                    <a href="javascript:;" data-unit="1" class="unit-option active">Wei</a>
-                    <a href="javascript:;" data-unit="1e6" class="unit-option">/ 10⁶</a>
-                    <a href="javascript:;" data-unit="1e9" class="unit-option">Gwei</a>
-                    <a href="javascript:;" data-unit="1e18" class="unit-option">Ether</a>
-                    <a href="javascript:;" data-unit="addr" class="unit-option">Address</a>
+                    <button type="button" data-unit="1" class="unit-option active">Wei</button>
+                    <button type="button" data-unit="1e6" class="unit-option">/ 10⁶</button>
+                    <button type="button" data-unit="1e9" class="unit-option">Gwei</button>
+                    <button type="button" data-unit="1e18" class="unit-option">Ether</button>
+                    <button type="button" data-unit="addr" class="unit-option">Address</button>
                   </div>
                 </div>`;
             }
 
             const renderedValue = renderValueWithAddressLinks(result);
-            resultDiv.innerHTML = `<span class="result-value">${renderedValue}</span>${controls}<a class="js-clipboard link-secondary" href="javascript:;" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></a>`;
+            resultDiv.innerHTML = `<span class="result-value">${renderedValue}</span>${controls}<button type="button" class="js-clipboard link-secondary" data-clipboard-text="${result}" data-bs-toggle="tooltip" data-bs-trigger="hover" title="Copy" aria-label="Copy"><i id="${copyId}" class="far fa-copy fa-fw"></i></button>`;
 
             // Tuple format toggle
             if (isTuple) {

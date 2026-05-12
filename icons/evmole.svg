@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">EVMole extension icon</title>
+  <desc id="desc">An original side-profile mole mascot with a faceted Ethereum-style EVM helmet.</desc>
+  <defs>
+    <linearGradient id="bg" x1="16" y1="8" x2="113" y2="122" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#18334a"/>
+      <stop offset="1" stop-color="#071726"/>
+    </linearGradient>
+    <linearGradient id="fur" x1="18" y1="52" x2="106" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#dfa348"/>
+      <stop offset=".7" stop-color="#c17a2f"/>
+      <stop offset="1" stop-color="#91551f"/>
+    </linearGradient>
+    <linearGradient id="snout" x1="7" y1="52" x2="37" y2="69" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd59f"/>
+      <stop offset="1" stop-color="#ee9a52"/>
+    </linearGradient>
+    <clipPath id="helmetClip">
+      <path d="M31 50c10-22 33-35 57-26 19 7 30 24 26 46-2 12-9 18-7 29-28-4-42-19-58-32-8-7-18-8-37-7 9-1 15-4 19-10z"/>
+    </clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="145%">
+      <feDropShadow dx="0" dy="6" stdDeviation="5" flood-color="#000814" flood-opacity=".42"/>
+    </filter>
+  </defs>
+
+  <rect width="128" height="128" rx="26" fill="url(#bg)"/>
+
+  <g transform="translate(128 0) scale(-1 1)">
+  <g filter="url(#shadow)">
+    <path d="M15 60c10-11 25-16 45-14 23 2 40 15 51 39l-10 2 10 8-10-1 8 9c-18 20-58 19-85-1-7-5 15-18 13-29-9-2-16-6-22-13z" fill="url(#fur)"/>
+    <path d="M13 60c6-8 14-10 25-7-5 7-13 10-25 7z" fill="url(#snout)"/>
+    <circle cx="12" cy="60" r="5.5" fill="#ffc98e"/>
+    <path d="M22 55 34 39M23 60 39 53M21 65 29 80" fill="none" stroke="#071726" stroke-width="2.7" stroke-linecap="round"/>
+    <path d="M43 84c18 7 35 2 52-15" fill="none" stroke="#071726" stroke-width="5.2" stroke-linecap="round"/>
+    <path d="M85 100c7-2 14-6 20-12" fill="none" stroke="#6a3d1c" stroke-width="5" stroke-linecap="round"/>
+    <path d="M96 93h9M93 99l9 4M89 103l6 7" fill="none" stroke="#ffd27d" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+
+  <g clip-path="url(#helmetClip)" filter="url(#shadow)">
+    <rect x="9" y="13" width="110" height="88" fill="#ffda2e"/>
+    <path d="M73 15 40 63l33 20 33-20z" fill="#111c2d" opacity=".18"/>
+    <path d="M73 15 40 63l33 20V15z" fill="#fff04e"/>
+    <path d="M73 15v68l33-20z" fill="#ff958f"/>
+    <path d="M40 63 73 83 58 51z" fill="#8ee64d"/>
+    <path d="M106 63 73 83l16-32z" fill="#d66ee5"/>
+    <path d="M73 83 43 70l30 37 30-37z" fill="#47d9ea"/>
+    <path d="M73 83v24l30-37z" fill="#4f91f7"/>
+    <path d="M73 15v92" stroke="#071726" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <path d="M31 50c10-22 33-35 57-26 19 7 30 24 26 46-2 12-9 18-7 29-28-4-42-19-58-32-8-7-18-8-37-7 9-1 15-4 19-10z" fill="none" stroke="#071726" stroke-width="5" stroke-linejoin="round"/>
+
+  <ellipse cx="52" cy="43" rx="10" ry="15" transform="rotate(17 52 43)" fill="#f8fbff" stroke="#071726" stroke-width="5"/>
+  <circle cx="55" cy="41" r="3.3" fill="#071726"/>
+  </g>
+</svg>

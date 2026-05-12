@@ -487,7 +487,12 @@ async function queryReadFunction(selector, signature, contractAddress) {
     if (dataLen > 32 && dataLen % 32 === 0) {
       const decoded = decodeTupleResult(rawResult.data);
       if (decoded) {
-        return { success: true, result: decoded.formatted, rawChunks: decoded.chunks };
+        return {
+          success: true,
+          result: decoded.formatted,
+          rawChunks: decoded.chunks,
+          linkScanValue: autoDecodeTuple(decoded.chunks)
+        };
       }
     }
 
