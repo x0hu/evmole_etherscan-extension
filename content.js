@@ -463,7 +463,7 @@ function escapeHtml(str) {
     injectScript('evmole-script.js', document.head || document.documentElement);
     injectStyles('styles.css');
     
-    const standardERC20Functions = [
+    const standardFunctionSignatures = [
       'name()',
       'symbol()',
       'decimals()',
@@ -476,8 +476,33 @@ function escapeHtml(str) {
       'owner()',
       'transferOwnership(address)',
       'renounceOwnership()',
-      'rescueERC20(address,uint256)'
+      'rescueERC20(address,uint256)',
+      'poolManager()',
+      'beforeInitialize(address,(address,address,uint24,int24,address),uint160)',
+      'afterInitialize(address,(address,address,uint24,int24,address),uint160,int24)',
+      'beforeAddLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)',
+      'afterAddLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),int256,int256,bytes)',
+      'beforeRemoveLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)',
+      'afterRemoveLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),int256,int256,bytes)',
+      'beforeSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),bytes)',
+      'afterSwap(address,(address,address,uint24,int24,address),(bool,int256,uint160),int256,bytes)',
+      'beforeDonate(address,(address,address,uint24,int24,address),uint256,uint256,bytes)',
+      'afterDonate(address,(address,address,uint24,int24,address),uint256,uint256,bytes)'
     ];
+
+    const standardFunctionSelectors = new Set([
+      '0xdc4c90d3', // poolManager
+      '0xdc98354e', // beforeInitialize
+      '0x6fe7e6eb', // afterInitialize
+      '0x259982e5', // beforeAddLiquidity
+      '0x9f063efc', // afterAddLiquidity
+      '0x21d0ee70', // beforeRemoveLiquidity
+      '0x6c2bbe7e', // afterRemoveLiquidity
+      '0x575e24b4', // beforeSwap
+      '0xb47b2fb1', // afterSwap
+      '0xb6a8b0fa', // beforeDonate
+      '0xe1b4af69'  // afterDonate
+    ]);
 
     const contractAddress = getContractAddress();
     const linkScanRequestedSelectors = new Set();
@@ -549,7 +574,8 @@ function escapeHtml(str) {
             const [args, mutability] = argsAndMutability.split(' ');
             const functionName = signatureInfo.trim();
 
-            const isNonStandard = !standardERC20Functions.includes(functionName);
+            const isNonStandard = !standardFunctionSignatures.includes(functionName) &&
+                                  !standardFunctionSelectors.has(selectorId.toLowerCase());
             const highlightClass = isNonStandard ? 'highlight-non-standard' : '';
 
             // Check if no-arg read function (queryable)
