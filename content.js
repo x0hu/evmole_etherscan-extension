@@ -877,9 +877,7 @@ function escapeHtml(str) {
               item.addEventListener('click', (e) => {
                 if (e.target.closest('.query-dropdown')) return;
                 const dropdown = item.querySelector('.query-dropdown');
-                if (dropdown.style.display === 'none') {
-                  dropdown.style.display = 'block';
-                }
+                dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
               });
 
               const queryBtn = item.querySelector('.query-btn');
