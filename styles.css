@@ -254,6 +254,10 @@
   background-color: rgba(52, 152, 219, 0.15);
 }
 
+.selector-item.parameterized-queryable:hover {
+  background-color: rgba(155, 89, 182, 0.15);
+}
+
 .queryable-indicator {
   display: inline-flex;
   align-items: center;
@@ -272,11 +276,88 @@
   font-size: 8px;
 }
 
+.queryable-indicator.parameterized {
+  background: rgba(155, 89, 182, 0.25);
+  color: #9b59b6;
+}
+
 .query-dropdown {
   margin-top: 8px;
   padding: 8px;
   background: rgba(0, 0, 0, 0.2);
   border-radius: 4px;
+}
+
+.parameterized-query-dropdown {
+  border: 1px solid rgba(155, 89, 182, 0.35);
+}
+
+.query-param-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.query-param-field {
+  display: grid;
+  grid-template-columns: minmax(80px, 34%) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.query-param-label {
+  color: #b98ad6;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.query-param-control {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.query-param-input {
+  box-sizing: border-box;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #3b2a46;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #e4e6eb;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.query-param-input:focus {
+  border-color: #9b59b6;
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(155, 89, 182, 0.25);
+}
+
+.param-unit-dropdown {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.param-unit-toggle {
+  width: 20px;
+  height: 20px;
+  margin-left: 0 !important;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #95a5a6;
+  cursor: pointer;
+}
+
+.param-unit-toggle:hover {
+  color: #9b59b6;
 }
 
 .query-btn {
@@ -291,6 +372,19 @@
 
 .query-btn:hover {
   background: #2980b9;
+}
+
+.query-btn.parameterized {
+  background: #9b59b6;
+}
+
+.query-btn.parameterized:hover:not(:disabled) {
+  background: #8e44ad;
+}
+
+.query-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .query-result {
@@ -409,6 +503,30 @@
 
 .unit-option.active {
   color: #2ecc71;
+}
+
+.param-unit-menu {
+  bottom: auto;
+  top: calc(100% + 4px);
+  left: auto;
+  right: 0;
+  transform: none;
+  min-width: 104px;
+  padding: 4px 0;
+  background: #1c1e21;
+  border: 1px solid #2d2f31;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  z-index: 1002;
+}
+
+.param-unit-option {
+  color: #bdc3c7;
+}
+
+.param-unit-option:hover {
+  background: rgba(155, 89, 182, 0.22);
+  color: #d8c4e8;
 }
 
 /* Implementation notice for proxy contracts */

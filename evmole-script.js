@@ -228,10 +228,10 @@ async function hedgedRpcRequest(method, params, { maxRpcs = QUERY_HEDGE_MAX_RPCS
   }
 }
 
-async function hedgedReadCall(contractAddress, selector, { allowEmpty = false, maxRpcs, staggerMs } = {}) {
+async function hedgedReadCall(contractAddress, calldata, { allowEmpty = false, maxRpcs, staggerMs } = {}) {
   const winner = await hedgedRpcRequest(
     'eth_call',
-    [{ to: contractAddress, data: selector }, 'latest'],
+    [{ to: contractAddress, data: calldata }, 'latest'],
     { maxRpcs, staggerMs }
   );
   const data = winner.result;
@@ -457,13 +457,260 @@ function decodeAddressArrayResult(hexData) {
   return values;
 }
 
-async function queryReadFunction(selector, signature, contractAddress) {
+function splitTopLevelAbiTypes(input) {
+  const value = String(input || '').trim();
+  if (!value) return [];
+
+  let inner = value;
+  if (inner.startsWith('(') && inner.endsWith(')')) {
+    let depth = 0;
+    let wraps = true;
+    for (let i = 0; i < inner.length; i++) {
+      if (inner[i] === '(') depth++;
+      if (inner[i] === ')') depth--;
+      if (depth === 0 && i < inner.length - 1) {
+        wraps = false;
+        break;
+      }
+    }
+    if (wraps) inner = inner.slice(1, -1);
+  }
+
+  const types = [];
+  let depth = 0;
+  let current = '';
+  for (const char of inner) {
+    if (char === '(') depth++;
+    if (char === ')') depth--;
+    if (char === ',' && depth === 0) {
+      types.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) types.push(current.trim());
+  return types;
+}
+
+function parseAbiType(type) {
+  let base = String(type || '').trim();
+  if (!base) throw new Error('Missing ABI type');
+
+  const arrays = [];
+  while (base.endsWith(']')) {
+    const start = base.lastIndexOf('[');
+    if (start === -1) throw new Error(`Invalid array type ${type}`);
+    const sizeText = base.slice(start + 1, -1);
+    if (sizeText !== '' && !/^\d+$/.test(sizeText)) {
+      throw new Error(`Invalid array size in ${type}`);
+    }
+    arrays.unshift(sizeText === '' ? null : Number(sizeText));
+    base = base.slice(0, start);
+  }
+
+  let parsed;
+  if (base.startsWith('(') && base.endsWith(')')) {
+    parsed = { kind: 'tuple', components: splitTopLevelAbiTypes(base).map(parseAbiType) };
+  } else if (base === 'address' || base === 'bool' || base === 'string' || base === 'bytes') {
+    parsed = { kind: base };
+  } else if (/^bytes([1-9]|[12][0-9]|3[0-2])$/.test(base)) {
+    parsed = { kind: 'fixedBytes', size: Number(base.slice(5)) };
+  } else if (/^uint([0-9]+)?$/.test(base) || /^int([0-9]+)?$/.test(base)) {
+    const signed = base.startsWith('int');
+    const bits = Number(base.replace(/^(u?int)/, '')) || 256;
+    if (bits < 8 || bits > 256 || bits % 8 !== 0) {
+      throw new Error(`Unsupported integer size ${base}`);
+    }
+    parsed = { kind: signed ? 'int' : 'uint', bits };
+  } else {
+    throw new Error(`Unsupported ABI type ${type}`);
+  }
+
+  for (const size of arrays) {
+    parsed = { kind: 'array', element: parsed, size };
+  }
+  return parsed;
+}
+
+function isDynamicAbiType(type) {
+  if (type.kind === 'string' || type.kind === 'bytes') return true;
+  if (type.kind === 'array') return type.size === null || isDynamicAbiType(type.element);
+  if (type.kind === 'tuple') return type.components.some(isDynamicAbiType);
+  return false;
+}
+
+function staticAbiByteLength(type) {
+  if (isDynamicAbiType(type)) return 32;
+  if (type.kind === 'tuple') {
+    return type.components.reduce((total, component) => total + staticAbiByteLength(component), 0);
+  }
+  if (type.kind === 'array') {
+    return type.size * staticAbiByteLength(type.element);
+  }
+  return 32;
+}
+
+function stripHexPrefix(value) {
+  return String(value || '').replace(/^0x/i, '');
+}
+
+function padBytesRight(hex) {
+  const clean = stripHexPrefix(hex);
+  return clean.padEnd(Math.ceil(clean.length / 64) * 64, '0');
+}
+
+function encodeUintWord(value, bits = 256) {
+  const text = typeof value === 'bigint' ? value.toString() : String(value).trim();
+  if (!/^(?:0x[a-fA-F0-9]+|\d+)$/.test(text)) {
+    throw new Error(`Invalid uint${bits} value`);
+  }
+  const parsed = BigInt(text);
+  const max = 1n << BigInt(bits);
+  if (parsed < 0n || parsed >= max) {
+    throw new Error(`uint${bits} value out of range`);
+  }
+  return parsed.toString(16).padStart(64, '0');
+}
+
+function encodeIntWord(value, bits = 256) {
+  const text = typeof value === 'bigint' ? value.toString() : String(value).trim();
+  if (!/^-?(?:0x[a-fA-F0-9]+|\d+)$/.test(text)) {
+    throw new Error(`Invalid int${bits} value`);
+  }
+  let parsed;
+  if (text.startsWith('-0x')) {
+    parsed = -BigInt('0x' + text.slice(3));
+  } else {
+    parsed = BigInt(text);
+  }
+  const min = -(1n << BigInt(bits - 1));
+  const max = (1n << BigInt(bits - 1)) - 1n;
+  if (parsed < min || parsed > max) {
+    throw new Error(`int${bits} value out of range`);
+  }
+  if (parsed < 0n) {
+    parsed = (1n << BigInt(bits)) + parsed;
+  }
+  return parsed.toString(16).padStart(64, '0');
+}
+
+function parseCompositeInput(value, typeLabel) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch (e) {
+    throw new Error(`${typeLabel} input must be valid JSON`);
+  }
+}
+
+function encodeAbiSequence(types, values) {
+  if (!Array.isArray(values) || values.length !== types.length) {
+    throw new Error(`Expected ${types.length} input value${types.length === 1 ? '' : 's'}`);
+  }
+
+  const headByteLength = types.reduce((total, type) => total + staticAbiByteLength(type), 0);
+  const heads = [];
+  const tails = [];
+  let tailByteLength = 0;
+
+  types.forEach((type, index) => {
+    if (isDynamicAbiType(type)) {
+      heads.push(encodeUintWord(headByteLength + tailByteLength));
+      const tail = encodeAbiValue(type, values[index]);
+      tails.push(tail);
+      tailByteLength += tail.length / 2;
+    } else {
+      heads.push(encodeAbiValue(type, values[index]));
+    }
+  });
+
+  return heads.join('') + tails.join('');
+}
+
+function encodeAbiValue(type, value) {
+  if (type.kind === 'address') {
+    const address = String(value || '').trim();
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new Error('Invalid address input');
+    }
+    return address.slice(2).toLowerCase().padStart(64, '0');
+  }
+
+  if (type.kind === 'bool') {
+    const text = typeof value === 'boolean' ? String(value) : String(value).trim().toLowerCase();
+    if (!['true', 'false', '1', '0'].includes(text)) {
+      throw new Error('Bool input must be true, false, 1, or 0');
+    }
+    return text === 'true' || text === '1' ? '0'.repeat(63) + '1' : '0'.repeat(64);
+  }
+
+  if (type.kind === 'uint') return encodeUintWord(value, type.bits);
+  if (type.kind === 'int') return encodeIntWord(value, type.bits);
+
+  if (type.kind === 'fixedBytes') {
+    const clean = stripHexPrefix(value).toLowerCase();
+    if (!/^[a-f0-9]*$/.test(clean) || clean.length !== type.size * 2) {
+      throw new Error(`bytes${type.size} input must be exactly ${type.size} bytes`);
+    }
+    return clean.padEnd(64, '0');
+  }
+
+  if (type.kind === 'bytes') {
+    const clean = stripHexPrefix(value).toLowerCase();
+    if (!/^[a-f0-9]*$/.test(clean) || clean.length % 2 !== 0) {
+      throw new Error('Bytes input must be even-length hex');
+    }
+    return encodeUintWord(clean.length / 2) + padBytesRight(clean);
+  }
+
+  if (type.kind === 'string') {
+    const bytes = new TextEncoder().encode(String(value ?? ''));
+    const hex = Array.from(bytes).map(byte => byte.toString(16).padStart(2, '0')).join('');
+    return encodeUintWord(bytes.length) + padBytesRight(hex);
+  }
+
+  if (type.kind === 'tuple') {
+    const tupleValues = parseCompositeInput(value, 'Tuple');
+    if (!Array.isArray(tupleValues)) {
+      throw new Error('Tuple input must be a JSON array');
+    }
+    return encodeAbiSequence(type.components, tupleValues);
+  }
+
+  if (type.kind === 'array') {
+    const arrayValues = parseCompositeInput(value, 'Array');
+    if (!Array.isArray(arrayValues)) {
+      throw new Error('Array input must be a JSON array');
+    }
+    if (type.size !== null && arrayValues.length !== type.size) {
+      throw new Error(`Expected array length ${type.size}`);
+    }
+    const encoded = encodeAbiSequence(Array(arrayValues.length).fill(type.element), arrayValues);
+    return type.size === null ? encodeUintWord(arrayValues.length) + encoded : encoded;
+  }
+
+  throw new Error('Unsupported ABI input');
+}
+
+function encodeReadFunctionCalldata(selector, inputTypes = [], inputValues = []) {
+  const normalizedSelector = String(selector || '').trim();
+  if (!/^0x[a-fA-F0-9]{8}$/.test(normalizedSelector)) {
+    throw new Error('Invalid function selector');
+  }
+  if (!inputTypes.length) return normalizedSelector;
+  return normalizedSelector + encodeAbiSequence(inputTypes.map(parseAbiType), inputValues);
+}
+
+async function queryReadFunction(selector, signature, contractAddress, inputTypes = [], inputValues = []) {
   const fnName = signature.split('(')[0];
   const lowerFnName = fnName.toLowerCase();
 
   // Do raw call first to check response length
   try {
-    const rawResult = await hedgedReadCall(contractAddress, selector);
+    const calldata = encodeReadFunctionCalldata(selector, inputTypes, inputValues);
+    const rawResult = await hedgedReadCall(contractAddress, calldata);
 
     if (!rawResult.data || rawResult.data === '0x') {
       return { success: false, error: 'Empty response' };
@@ -609,8 +856,8 @@ function autoDecodeTuple(chunks) {
 
 window.addEventListener('message', async (event) => {
   if (event.data?.type === 'QUERY_READ_FUNCTION') {
-    const { selector, signature, contractAddress, purpose } = event.data;
-    const result = await queryReadFunction(selector, signature, contractAddress);
+    const { selector, signature, contractAddress, purpose, inputTypes, inputValues } = event.data;
+    const result = await queryReadFunction(selector, signature, contractAddress, inputTypes, inputValues);
     window.postMessage({
       type: 'QUERY_RESULT',
       selector,

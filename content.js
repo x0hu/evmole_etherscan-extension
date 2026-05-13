@@ -539,6 +539,191 @@ function escapeHtml(str) {
     const contractAddress = getContractAddress();
     const linkScanRequestedSelectors = new Set();
 
+    function splitTopLevelAbiTypes(input) {
+      const value = String(input || '').trim();
+      if (!value || value === '()') return [];
+
+      let inner = value;
+      if (inner.startsWith('(') && inner.endsWith(')')) {
+        let depth = 0;
+        let wraps = true;
+        for (let i = 0; i < inner.length; i++) {
+          if (inner[i] === '(') depth++;
+          if (inner[i] === ')') depth--;
+          if (depth === 0 && i < inner.length - 1) {
+            wraps = false;
+            break;
+          }
+        }
+        if (wraps) inner = inner.slice(1, -1);
+      }
+
+      const types = [];
+      let depth = 0;
+      let current = '';
+      for (const char of inner) {
+        if (char === '(') depth++;
+        if (char === ')') depth--;
+        if (char === ',' && depth === 0) {
+          types.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      if (current.trim()) types.push(current.trim());
+      return types;
+    }
+
+    function normalizeAbiType(type) {
+      let base = String(type || '').trim();
+      if (!base) return null;
+
+      const arrays = [];
+      while (base.endsWith(']')) {
+        const start = base.lastIndexOf('[');
+        if (start === -1) return null;
+        const size = base.slice(start + 1, -1);
+        if (size !== '' && !/^\d+$/.test(size)) return null;
+        arrays.unshift(size === '' ? '[]' : `[${size}]`);
+        base = base.slice(0, start);
+      }
+
+      let normalizedBase;
+      if (base.startsWith('(') && base.endsWith(')')) {
+        const components = splitTopLevelAbiTypes(base).map(normalizeAbiType);
+        if (components.some(component => !component)) return null;
+        normalizedBase = `(${components.join(',')})`;
+      } else if (base === 'address' || base === 'bool' || base === 'string' || base === 'bytes') {
+        normalizedBase = base;
+      } else if (/^bytes([1-9]|[12][0-9]|3[0-2])$/.test(base)) {
+        normalizedBase = base;
+      } else if (/^uint([0-9]+)?$/.test(base) || /^int([0-9]+)?$/.test(base)) {
+        const bits = Number(base.replace(/^(u?int)/, '')) || 256;
+        if (bits < 8 || bits > 256 || bits % 8 !== 0) return null;
+        normalizedBase = base.startsWith('uint') ? `uint${bits}` : `int${bits}`;
+      } else {
+        return null;
+      }
+
+      return normalizedBase + arrays.join('');
+    }
+
+    function isCompositeAbiInput(type) {
+      return type.includes('[') || type.startsWith('(');
+    }
+
+    function isUintAbiInput(type) {
+      return /^uint(?:[0-9]+)?$/.test(type);
+    }
+
+    function getInputPlaceholder(type) {
+      if (type === 'address') return '0x...';
+      if (type === 'bool') return 'true';
+      if (type.startsWith('uint') || type.startsWith('int')) return '123';
+      if (type === 'bytes' || /^bytes\d+$/.test(type)) return '0x...';
+      if (type === 'string') return 'text';
+      if (type.includes('[')) return '["value1","value2"]';
+      if (type.startsWith('(')) return '["value1","value2"]';
+      return 'value';
+    }
+
+    function decimalToScaledInteger(value, decimals) {
+      const trimmed = String(value || '').trim();
+      if (!/^\d+(?:\.\d+)?$/.test(trimmed)) {
+        throw new Error('Invalid decimal');
+      }
+
+      const [whole, fraction = ''] = trimmed.split('.');
+      if (fraction.length > decimals) {
+        throw new Error(`Too many decimal places for 10^${decimals}`);
+      }
+
+      const scaled = whole + fraction.padEnd(decimals, '0');
+      return (BigInt(scaled || '0')).toString();
+    }
+
+    function normalizeUintInputValue(value) {
+      const trimmed = String(value || '').trim();
+      if (!/^(?:0x[a-fA-F0-9]+|\d+)$/.test(trimmed)) {
+        throw new Error('Invalid integer');
+      }
+      return trimmed;
+    }
+
+    function multiplyUintInputValue(input, decimals) {
+      input.value = decimalToScaledInteger(input.value, decimals);
+    }
+
+    function getCheapInputError(type, value) {
+      const trimmed = String(value || '').trim();
+      if (!trimmed) return 'Required';
+      if (type === 'address' && !/^0x[a-fA-F0-9]{40}$/.test(trimmed)) return 'Invalid address';
+      if (type === 'bool' && !/^(true|false|1|0)$/i.test(trimmed)) return 'Invalid bool';
+      if (isUintAbiInput(type)) {
+        try {
+          normalizeUintInputValue(trimmed);
+        } catch (e) {
+          return e.message || 'Invalid integer';
+        }
+      } else if (type.startsWith('int') && !/^-?(?:0x[a-fA-F0-9]+|\d+)$/.test(trimmed)) {
+        return 'Invalid integer';
+      }
+      if ((type === 'bytes' || /^bytes\d+$/.test(type)) && (!/^0x[a-fA-F0-9]*$/.test(trimmed) || trimmed.length % 2 !== 0)) return 'Invalid hex';
+      if (isCompositeAbiInput(type)) {
+        try {
+          if (!Array.isArray(JSON.parse(trimmed))) return 'Must be a JSON array';
+        } catch (e) {
+          return 'Invalid JSON';
+        }
+      }
+      return '';
+    }
+
+    function renderUintInputUnitControl() {
+      return `<div class="unit-dropdown param-unit-dropdown">
+        <button type="button" class="link-secondary unit-toggle param-unit-toggle" title="Multiply input" aria-label="Multiply input"><i class="fas fa-exchange-alt fa-fw"></i></button>
+        <div class="unit-menu param-unit-menu">
+          <button type="button" data-decimals="6" class="unit-option param-unit-option">x 10⁶</button>
+          <button type="button" data-decimals="9" class="unit-option param-unit-option">x 10⁹</button>
+          <button type="button" data-decimals="18" class="unit-option param-unit-option">x 10¹⁸</button>
+        </div>
+      </div>`;
+    }
+
+    function renderParameterizedInputs(paramTypes) {
+      return `<div class="query-param-list">${paramTypes.map((type, index) => `
+        <label class="query-param-field">
+          <span class="query-param-label">${escapeHtml(type)}</span>
+          <span class="query-param-control">
+            <input class="query-param-input" type="text" data-param-index="${index}" data-param-type="${escapeHtml(type)}" placeholder="${escapeHtml(getInputPlaceholder(type))}" spellcheck="false">
+            ${isUintAbiInput(type) ? renderUintInputUnitControl() : ''}
+          </span>
+        </label>
+      `).join('')}</div>`;
+    }
+
+    function collectParameterizedInputs(item) {
+      const inputs = Array.from(item.querySelectorAll('.query-param-input'));
+      return inputs.map(input => {
+        const value = input.value.trim();
+        if (isUintAbiInput(input.dataset.paramType)) {
+          return normalizeUintInputValue(value);
+        }
+        return value;
+      });
+    }
+
+    function updateParameterizedQueryState(item) {
+      const button = item.querySelector('.query-btn.parameterized');
+      if (!button) return;
+
+      const inputs = Array.from(item.querySelectorAll('.query-param-input'));
+      const firstError = inputs.map(input => getCheapInputError(input.dataset.paramType, input.value)).find(Boolean);
+      button.disabled = Boolean(firstError);
+      button.title = firstError || 'Query';
+    }
+
     function isLikelyLinkReadFunction(signature) {
       const fnName = String(signature || '').split('(')[0].toLowerCase();
       const linkFunctionNames = new Set([
@@ -572,7 +757,7 @@ function escapeHtml(str) {
     }
 
     function queueReadFunctionLinkScan() {
-      const candidates = Array.from(panel.querySelectorAll('.selector-item.queryable'))
+      const candidates = Array.from(panel.querySelectorAll('.selector-item.queryable:not(.parameterized-queryable)'))
         .filter(item => {
           const selector = item.dataset.selector;
           const signature = item.dataset.signature;
@@ -614,19 +799,33 @@ function escapeHtml(str) {
                                   !standardFunctionSelectors.has(selectorId.toLowerCase());
             const highlightClass = isNonStandard ? 'highlight-non-standard' : '';
 
-            // Check if no-arg read function (queryable)
-            const isNoArgRead = (mutability === 'view' || mutability === 'pure') &&
-                                args === '()' &&
-                                functionName !== 'Unknown';
-            const queryableClass = isNoArgRead ? 'queryable' : '';
+            const isReadFunction = mutability === 'view' || mutability === 'pure';
+            const normalizedParamTypes = splitTopLevelAbiTypes(args).map(normalizeAbiType);
+            const hasParseableParams = normalizedParamTypes.length > 0 && normalizedParamTypes.every(Boolean);
+            const isNoArgRead = isReadFunction && args === '()' && functionName !== 'Unknown';
+            const isParameterizedRead = isReadFunction && hasParseableParams && functionName !== 'Unknown';
+            const queryableClass = isNoArgRead
+              ? 'queryable'
+              : (isParameterizedRead ? 'queryable parameterized-queryable' : '');
 
-            const queryIndicator = isNoArgRead ? '<span class="queryable-indicator">query</span>' : '';
+            const queryIndicator = isNoArgRead
+              ? '<span class="queryable-indicator">query</span>'
+              : (isParameterizedRead ? '<span class="queryable-indicator parameterized">query</span>' : '');
+            const queryDropdown = isNoArgRead ? `<div class="query-dropdown" style="display:none;">
+                  <button class="query-btn">Query</button>
+                  <div class="query-result"></div>
+                </div>` : (isParameterizedRead ? `<div class="query-dropdown parameterized-query-dropdown" style="display:none;">
+                  ${renderParameterizedInputs(normalizedParamTypes)}
+                  <button class="query-btn parameterized" disabled>Query</button>
+                  <div class="query-result"></div>
+                </div>` : '');
 
             const itemHtml = `
               <div class="selector-item ${highlightClass} ${queryableClass}"
                    data-selector="${selectorId}"
                    data-signature="${functionName}"
-                   data-queryable="${isNoArgRead}">
+                   data-queryable="${isNoArgRead || isParameterizedRead}"
+                   data-param-types="${escapeHtml(JSON.stringify(normalizedParamTypes.filter(Boolean)))}">
                 <div class="selector-info">
                   <span class="selector-id">${selectorId}</span>
                   <span class="arguments">${args}</span>
@@ -635,14 +834,11 @@ function escapeHtml(str) {
                 <div class="function-info">
                   <span class="function-name">${functionName}</span>${queryIndicator}
                 </div>
-                ${isNoArgRead ? `<div class="query-dropdown" style="display:none;">
-                  <button class="query-btn">Query</button>
-                  <div class="query-result"></div>
-                </div>` : ''}
+                ${queryDropdown}
               </div>
             `;
 
-            if (mutability === 'view' || mutability === 'pure') {
+            if (isReadFunction) {
               readFunctions.push(itemHtml);
             } else {
               writeFunctions.push(itemHtml);
@@ -690,9 +886,20 @@ function escapeHtml(str) {
               if (queryBtn) {
                 queryBtn.addEventListener('click', (e) => {
                   e.stopPropagation();
+                  if (queryBtn.disabled) return;
                   const selector = item.dataset.selector;
                   const signature = item.dataset.signature;
                   const resultDiv = item.querySelector('.query-result');
+                  const inputTypes = JSON.parse(item.dataset.paramTypes || '[]');
+                  let inputValues;
+                  try {
+                    inputValues = collectParameterizedInputs(item);
+                  } catch (err) {
+                    resultDiv.className = 'query-result error';
+                    resultDiv.textContent = err.message || 'Invalid input';
+                    updateParameterizedQueryState(item);
+                    return;
+                  }
                   resultDiv.className = 'query-result loading';
                   resultDiv.textContent = 'Loading...';
 
@@ -700,10 +907,59 @@ function escapeHtml(str) {
                     type: 'QUERY_READ_FUNCTION',
                     selector,
                     signature,
-                    contractAddress
+                    contractAddress,
+                    inputTypes,
+                    inputValues
                   }, '*');
                 });
               }
+
+              item.querySelectorAll('.query-param-input').forEach(input => {
+                input.addEventListener('click', e => e.stopPropagation());
+                input.addEventListener('input', () => updateParameterizedQueryState(item));
+              });
+              item.querySelectorAll('.param-unit-dropdown').forEach(dropdown => {
+                const toggle = dropdown.querySelector('.param-unit-toggle');
+                const menu = dropdown.querySelector('.param-unit-menu');
+                const input = dropdown.closest('.query-param-control')?.querySelector('.query-param-input');
+                if (!toggle || !menu || !input) return;
+
+                toggle.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  if (!input.value.trim()) {
+                    input.focus();
+                    updateParameterizedQueryState(item);
+                    return;
+                  }
+                  panel.querySelectorAll('.param-unit-menu.show').forEach(openMenu => {
+                    if (openMenu !== menu) openMenu.classList.remove('show');
+                  });
+                  menu.classList.toggle('show');
+                });
+
+                dropdown.querySelectorAll('.param-unit-option').forEach(option => {
+                  option.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    const decimals = Number(option.dataset.decimals);
+                    try {
+                      multiplyUintInputValue(input, decimals);
+                    } catch (err) {
+                      const resultDiv = item.querySelector('.query-result');
+                      if (resultDiv) {
+                        resultDiv.className = 'query-result error';
+                        resultDiv.textContent = err.message || 'Invalid input';
+                      }
+                      updateParameterizedQueryState(item);
+                      return;
+                    }
+                    menu.classList.remove('show');
+                    updateParameterizedQueryState(item);
+                  });
+                });
+              });
+              updateParameterizedQueryState(item);
             });
             // If starting collapsed, strip args from function names
             if (panel.parentNode && panel.parentNode.querySelector('.evmole-panel.collapsed')) {
