@@ -58,10 +58,23 @@ p {
   grid-template-columns: 1fr auto;
   gap: 18px;
   align-items: center;
+  margin-top: 12px;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--panel);
+}
+
+.setting-row:first-of-type {
+  margin-top: 0;
+}
+
+.signature-db-row {
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 230px);
+}
+
+.signature-db-row.compact {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .segmented-control {
@@ -103,6 +116,80 @@ p {
 }
 
 .segmented-control input:focus-visible + span {
+  outline: 2px solid #b9ddff;
+  outline-offset: 2px;
+}
+
+.text-field {
+  display: block;
+}
+
+.text-field input {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #16181b;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.text-field input::placeholder {
+  color: #6f7984;
+}
+
+.text-field input:focus {
+  outline: 2px solid #b9ddff;
+  outline-offset: 2px;
+}
+
+.switch-control {
+  position: relative;
+  display: inline-block;
+  width: 42px;
+  height: 24px;
+}
+
+.switch-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch-control span {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #16181b;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.switch-control span::before {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.switch-control input:checked + span {
+  background: var(--accent);
+}
+
+.switch-control input:checked + span::before {
+  background: #06111f;
+  transform: translateX(18px);
+}
+
+.switch-control input:focus-visible + span {
   outline: 2px solid #b9ddff;
   outline-offset: 2px;
 }

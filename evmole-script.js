@@ -66,6 +66,7 @@ const CHAIN_CONFIG = {
 
 const QUERY_HEDGE_STAGGER_MS = 180;
 const QUERY_HEDGE_MAX_RPCS = 3;
+const SIGNATURE_DB_TIMEOUT_MS = 3500;
 const RPC_COOLDOWN_429_MS = 2 * 60 * 1000;
 const RPC_COOLDOWN_403_MS = 10 * 60 * 1000;
 const RPC_COOLDOWN_NETWORK_MS = 30 * 1000;
@@ -73,6 +74,23 @@ const rpcCooldownUntil = new Map();
 const addressCodeLookupCache = new Map();
 const UINT64_MAX = BigInt('0xffffffffffffffff');
 const UINT160_MAX = BigInt('0xffffffffffffffffffffffffffffffffffffffff');
+
+function getInjectedExtensionConfig() {
+  const script = Array.from(document.scripts).reverse().find(candidate => {
+    try {
+      return new URL(candidate.src).pathname.endsWith('/evmole-script.js');
+    } catch (e) {
+      return false;
+    }
+  });
+
+  return {
+    signatureDatabaseUrl: String(script?.dataset.signatureDatabaseUrl || '').trim(),
+    signatureDatabaseStoreUnknowns: script?.dataset.signatureDatabaseStoreUnknowns === 'true'
+  };
+}
+
+const extensionConfig = getInjectedExtensionConfig();
 
 function getChainConfig() {
   const host = window.location.hostname;
@@ -149,6 +167,143 @@ function formatRpcError(error) {
   if (typeof error === 'string') return error;
   if (error.name === 'AbortError') return 'Request aborted';
   return error.message || String(error);
+}
+
+function normalizeSelector(selector) {
+  const text = String(selector || '').trim().toLowerCase();
+  if (!text) return null;
+  const prefixed = text.startsWith('0x') ? text : `0x${text}`;
+  return /^0x[a-f0-9]{8}$/.test(prefixed) ? prefixed : null;
+}
+
+function normalizeSignatureList(entries) {
+  if (!entries) return [];
+  const list = Array.isArray(entries) ? entries : [entries];
+  return [...new Set(list.map(entry => {
+    if (typeof entry === 'string') return entry;
+    return entry?.text_signature || entry?.signature || entry?.name || null;
+  }).filter(Boolean))];
+}
+
+function mergeSignatureMaps(...maps) {
+  const merged = {};
+  maps.forEach(map => {
+    Object.entries(map || {}).forEach(([rawSelector, entries]) => {
+      const selector = normalizeSelector(rawSelector);
+      if (!selector) return;
+      const names = normalizeSignatureList(entries);
+      if (names.length === 0) return;
+      merged[selector] = [...new Set([...normalizeSignatureList(merged[selector]), ...names])]
+        .map(name => ({ name }));
+    });
+  });
+  return merged;
+}
+
+function signaturesFromResolverPayload(payload) {
+  const signatures = {};
+  const add = (selector, entries) => {
+    const normalizedSelector = normalizeSelector(selector);
+    if (!normalizedSelector) return;
+    const names = normalizeSignatureList(entries);
+    if (names.length === 0) return;
+    signatures[normalizedSelector] = names.map(name => ({ name }));
+  };
+
+  if (payload?.result?.function) {
+    Object.entries(payload.result.function).forEach(([selector, entries]) => add(selector, entries));
+  }
+
+  if (payload?.signatures && typeof payload.signatures === 'object') {
+    Object.entries(payload.signatures).forEach(([selector, entries]) => add(selector, entries));
+  }
+
+  if (Array.isArray(payload?.results)) {
+    payload.results.forEach(entry => add(entry?.selector || entry?.hex_signature, entry));
+  }
+
+  if (Array.isArray(payload)) {
+    payload.forEach(entry => add(entry?.selector || entry?.hex_signature, entry));
+  }
+
+  return signatures;
+}
+
+function getSignatureDatabaseBaseUrl() {
+  const rawUrl = extensionConfig.signatureDatabaseUrl;
+  if (!rawUrl) return null;
+
+  try {
+    const url = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    return url.toString().replace(/\/$/, '');
+  } catch (e) {
+    return null;
+  }
+}
+
+async function fetchSignatureDatabase(selectors) {
+  const baseUrl = getSignatureDatabaseBaseUrl();
+  if (!baseUrl || selectors.length === 0) return {};
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SIGNATURE_DB_TIMEOUT_MS);
+
+  try {
+    const url = new URL(`${baseUrl}/signatures`);
+    url.searchParams.set('selectors', selectors.join(','));
+    url.searchParams.set('function', selectors.join(','));
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      console.log('Signature DB lookup failed:', response.status);
+      return {};
+    }
+
+    return signaturesFromResolverPayload(await response.json());
+  } catch (e) {
+    console.log('Signature DB lookup error:', e?.message || e);
+    return {};
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function storeSelectorObservations(functions, signatureMap, contractAddress) {
+  const baseUrl = getSignatureDatabaseBaseUrl();
+  if (!baseUrl || !extensionConfig.signatureDatabaseStoreUnknowns || functions.length === 0) return;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SIGNATURE_DB_TIMEOUT_MS);
+
+  try {
+    await fetch(`${baseUrl}/selectors/observations`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        contractAddress,
+        chainHost: window.location.hostname,
+        pageUrl: window.location.href,
+        functions: functions.map(fn => {
+          const selector = normalizeSelector(fn.selector);
+          return {
+            selector,
+            arguments: fn.arguments || '',
+            stateMutability: fn.stateMutability || null,
+            signatures: normalizeSignatureList(signatureMap[selector] || [])
+          };
+        }).filter(fn => fn.selector)
+      })
+    });
+  } catch (e) {
+    console.log('Signature DB observation store error:', e?.message || e);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function rawRpcRequest(rpc, method, params, signal) {
@@ -882,24 +1037,31 @@ async function fetchSignatures(selectors) {
     return {};
   }
   const formattedSelectors = selectors.map(selector =>
-    selector.startsWith('0x') ? selector : `0x${selector}`
-  );
-  const url = 'https://api.openchain.xyz/signature-database/v1/lookup?filter=true&function=' + formattedSelectors.join(',');
+    normalizeSelector(selector)
+  ).filter(Boolean);
+
+  const localSignatures = await fetchSignatureDatabase(formattedSelectors);
+  const publicLookupSelectors = formattedSelectors.filter(selector => !localSignatures[selector]?.length);
+  if (publicLookupSelectors.length === 0) {
+    return localSignatures;
+  }
+
+  const url = 'https://api.openchain.xyz/signature-database/v1/lookup?filter=true&function=' + publicLookupSelectors.join(',');
   try {
     const response = await fetch(url);
     if (!response.ok) {
       console.log('Signature lookup failed:', response.status);
-      return {};
+      return localSignatures;
     }
     const data = await response.json();
     // Defensive: check data, result, and function all exist
     if (data && data.result && data.result.function) {
-      return data.result.function;
+      return mergeSignatureMaps(localSignatures, data.result.function);
     }
-    return {};
+    return localSignatures;
   } catch (e) {
     console.log('Signature lookup error:', e);
-    return {};
+    return localSignatures;
   }
 }
 
@@ -1054,6 +1216,15 @@ async function extractFunctions() {
     console.log('Found', selectors.length, 'selectors');
 
     const signatures = await fetchSignatures(selectors);
+    await storeSelectorObservations(
+      selectors.map(selector => ({
+        selector: selector.startsWith('0x') ? selector : `0x${selector}`,
+        arguments: functionArguments(bytecodeToAnalyze, selector),
+        stateMutability: functionStateMutability(bytecodeToAnalyze, selector)
+      })),
+      signatures,
+      contractAddress
+    );
 
     const selectorsWithDetails = await Promise.all(selectors.map(async (selector) => {
       const args = functionArguments(bytecodeToAnalyze, selector);

@@ -11,7 +11,7 @@
       <header>
         <div>
           <h1>Evmole Settings</h1>
-          <p>Choose how contract function panels open by default.</p>
+          <p>Choose how contract function panels open and resolve signatures.</p>
         </div>
       </header>
 
@@ -32,6 +32,35 @@
             <span>Expanded</span>
           </label>
         </fieldset>
+      </section>
+
+      <section class="setting-row signature-db-row" aria-labelledby="signature-db-label">
+        <div>
+          <h2 id="signature-db-label">Signature database resolver</h2>
+          <p>Use a Postgres-backed HTTP resolver for private or newly discovered function signatures.</p>
+        </div>
+
+        <label class="text-field">
+          <span class="sr-only">Signature database resolver URL</span>
+          <input
+            id="signatureDatabaseUrl"
+            type="url"
+            inputmode="url"
+            placeholder="http://localhost:8787"
+            autocomplete="off">
+        </label>
+      </section>
+
+      <section class="setting-row signature-db-row compact" aria-labelledby="signature-db-store-label">
+        <div>
+          <h2 id="signature-db-store-label">Store selector observations</h2>
+          <p>When a resolver is configured, send selector, argument, mutability, and matched signature data to it.</p>
+        </div>
+
+        <label class="switch-control">
+          <input id="signatureDatabaseStoreUnknowns" type="checkbox">
+          <span aria-hidden="true"></span>
+        </label>
       </section>
 
       <p id="status" class="status" role="status" aria-live="polite"></p>

@@ -6,15 +6,22 @@ function escapeHtml(str) {
       .replace(/"/g, '&quot;');
   }
 
-  function injectScript(file, node) {
+  function injectScript(file, node, dataset = {}) {
     const script = document.createElement('script');
     script.setAttribute('type', 'module');
     script.setAttribute('src', chrome.runtime.getURL(file));
+    Object.entries(dataset).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        script.dataset[key] = String(value);
+      }
+    });
     node.appendChild(script);
   }
 
   const DEFAULT_SETTINGS = {
-    contractFunctionsDefaultCollapsed: true
+    contractFunctionsDefaultCollapsed: true,
+    signatureDatabaseUrl: '',
+    signatureDatabaseStoreUnknowns: false
   };
 
   function getExtensionSettings() {
@@ -478,6 +485,75 @@ function escapeHtml(str) {
     return renderInlineLinks(value, { addressLinks: true });
   }
 
+  function getSignatureDatabaseBaseUrl(settings) {
+    const rawUrl = String(settings?.signatureDatabaseUrl || '').trim();
+    if (!rawUrl) return null;
+
+    try {
+      const url = new URL(rawUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) return null;
+      return url.toString().replace(/\/$/, '');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function parseJsonAbiText(text) {
+    const raw = String(text || '').trim();
+    if (!raw || !raw.startsWith('[')) return null;
+
+    try {
+      const abi = JSON.parse(raw);
+      return Array.isArray(abi) && abi.some(entry => entry?.type === 'function')
+        ? abi
+        : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function getVerifiedContractAbi() {
+    const directAbi = parseJsonAbiText(document.getElementById('js-copytextarea2')?.textContent);
+    if (directAbi) return directAbi;
+
+    const candidates = Array.from(document.querySelectorAll('pre, textarea, code'));
+    for (const candidate of candidates) {
+      const abi = parseJsonAbiText(candidate.textContent || candidate.value);
+      if (abi) return abi;
+    }
+
+    return null;
+  }
+
+  async function postVerifiedAbiToSignatureDb(settings, contractAddress) {
+    const baseUrl = getSignatureDatabaseBaseUrl(settings);
+    if (!baseUrl || !contractAddress) return;
+
+    const abi = getVerifiedContractAbi();
+    if (!abi) return;
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3500);
+
+    try {
+      await fetch(`${baseUrl}/abis/verified`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          contractAddress,
+          chainHost: window.location.hostname,
+          pageUrl: window.location.href,
+          abi
+        })
+      });
+    } catch (e) {
+      console.log('Signature DB verified ABI store error:', e?.message || e);
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
   async function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
     const editorElement = document.querySelector('#editor');
@@ -492,7 +568,6 @@ function escapeHtml(str) {
       defaultCollapsed: settings.contractFunctionsDefaultCollapsed
     });
     
-    injectScript('evmole-script.js', document.head || document.documentElement);
     injectStyles('styles.css');
     
     const standardFunctionSignatures = [
@@ -538,6 +613,11 @@ function escapeHtml(str) {
 
     const contractAddress = getContractAddress();
     const linkScanRequestedSelectors = new Set();
+    await postVerifiedAbiToSignatureDb(settings, contractAddress);
+    injectScript('evmole-script.js', document.head || document.documentElement, {
+      signatureDatabaseUrl: settings.signatureDatabaseUrl || '',
+      signatureDatabaseStoreUnknowns: settings.signatureDatabaseStoreUnknowns ? 'true' : 'false'
+    });
 
     function splitTopLevelAbiTypes(input) {
       const value = String(input || '').trim();

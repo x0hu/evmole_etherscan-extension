@@ -6,6 +6,7 @@ Chrome extension for Etherscan-style explorers that adds contract-analysis and t
 
 - Contract function selector panel on `address/*` and `token/*` pages
 - Transaction input calldata decoding on `tx/*` pages
+- Optional Postgres-backed private signature resolver for selectors missing from public datasets
 - List-page QOL actions like quick "Incoming" / "CA Create" filters
 - Auto-sets transaction list page size to 100 when supported
 
@@ -28,6 +29,7 @@ Supported explorers include Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, S
 - The extension runs only on explorer domains listed in `manifest.json`.
 - It does not include analytics or user tracking.
 - Signature decoding may query public signature services when a selector is unknown locally.
+- Private selector signatures can be served from the optional resolver in `signature-db/`.
 
 ## Credits
 
