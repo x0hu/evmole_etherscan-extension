@@ -25,7 +25,10 @@
     "open_in_tab": false
   },
   "host_permissions": [
-    "https://bridge-fetchagg.vercel.app/*"
+    "https://bridge-fetchagg.vercel.app/*",
+    "https://openrouter.ai/*",
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "bridge-origin/background.js"

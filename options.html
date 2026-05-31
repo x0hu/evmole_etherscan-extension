@@ -63,6 +63,29 @@
         </label>
       </section>
 
+      <section class="setting-row openrouter-row" aria-labelledby="openrouter-label">
+        <div>
+          <h2 id="openrouter-label">OpenRouter API key</h2>
+          <p>Optional local key used to summarize contract behavior with DeepSeek V4 Flash.</p>
+        </div>
+
+        <div class="key-control">
+          <label class="text-field">
+            <span class="sr-only">OpenRouter API key</span>
+            <input
+              id="openRouterApiKey"
+              type="password"
+              placeholder="sk-or-..."
+              autocomplete="off"
+              spellcheck="false">
+          </label>
+          <div class="button-row">
+            <button id="saveOpenRouterApiKey" type="button">Save</button>
+            <button id="clearOpenRouterApiKey" type="button">Clear</button>
+          </div>
+        </div>
+      </section>
+
       <p id="status" class="status" role="status" aria-live="polite"></p>
     </main>
 

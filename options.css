@@ -77,6 +77,10 @@ p {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.openrouter-row {
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 260px);
+}
+
 .segmented-control {
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(94px, 1fr));
@@ -141,6 +145,39 @@ p {
 }
 
 .text-field input:focus {
+  outline: 2px solid #b9ddff;
+  outline-offset: 2px;
+}
+
+.key-control {
+  display: grid;
+  gap: 8px;
+}
+
+.button-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.button-row button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #16181b;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.button-row button:hover {
+  border-color: var(--accent);
+}
+
+.button-row button:focus-visible {
   outline: 2px solid #b9ddff;
   outline-offset: 2px;
 }

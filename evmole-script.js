@@ -1011,12 +1011,13 @@ function autoDecodeTuple(chunks) {
 
 window.addEventListener('message', async (event) => {
   if (event.data?.type === 'QUERY_READ_FUNCTION') {
-    const { selector, signature, contractAddress, purpose, inputTypes, inputValues } = event.data;
+    const { selector, signature, contractAddress, purpose, inputTypes, inputValues, requestId } = event.data;
     const result = await queryReadFunction(selector, signature, contractAddress, inputTypes, inputValues);
     window.postMessage({
       type: 'QUERY_RESULT',
       selector,
       purpose,
+      requestId,
       ...result
     }, '*');
   }

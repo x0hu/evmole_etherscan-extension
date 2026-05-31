@@ -23,7 +23,21 @@ function escapeHtml(str) {
     signatureDatabaseUrl: '',
     signatureDatabaseStoreUnknowns: false
   };
-
+  const OPENROUTER_SUMMARY_TYPE = 'EVMOLE_OPENROUTER_SUMMARY';
+  const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
+  const OPENROUTER_CHAT_TYPE = 'EVMOLE_OPENROUTER_CHAT';
+  const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
+  const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v5-decimals-fallback';
+  const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash';
+  const SUMMARY_READ_PURPOSE = 'SUMMARY_CONTEXT';
+  const CHAT_TOOL_READ_PURPOSE = 'CHAT_TOOL_READ';
+  const SUMMARY_MIN_AUTO_READ_LIMIT = 10;
+  const SUMMARY_MAX_AUTO_READ_LIMIT = 20;
+  const SUMMARY_RELOAD_READ_LIMIT = 35;
+  const SUMMARY_AUTO_READ_TIMEOUT_MS = 3000;
+  const SUMMARY_RELOAD_READ_TIMEOUT_MS = 8000;
+  const SUMMARY_AUTO_READ_STAGGER_MS = 100;
+  const SUMMARY_RELOAD_READ_STAGGER_MS = 180;
   function getExtensionSettings() {
     return new Promise(resolve => {
       if (typeof chrome === 'undefined' || !chrome.storage?.sync) {
@@ -327,6 +341,7 @@ function escapeHtml(str) {
     contentDiv.innerHTML = content;
     contentDiv.addDiscoveredLinks = addReadFunctionLinks;
     contentDiv.refreshLinksPanel = updateLinksPanel;
+    contentDiv.getAllDiscoveredLinks = getAllLinks;
     panel.appendChild(contentDiv);
 
     const closeButton = document.createElement('button');
@@ -369,6 +384,43 @@ function escapeHtml(str) {
     };
 
     return contentDiv;
+  }
+
+  function createSummaryPanel(content) {
+    const container = document.createElement('div');
+    container.className = 'evmole-summary-container';
+
+    const panel = document.createElement('div');
+    panel.className = 'evmole-summary-panel';
+    panel.innerHTML = content;
+
+    const closeButton = document.createElement('button');
+    closeButton.innerHTML = '&times;';
+    closeButton.className = 'evmole-summary-close-btn';
+    closeButton.onclick = function() {
+      document.body.removeChild(container);
+    };
+    panel.appendChild(closeButton);
+
+    container.appendChild(panel);
+    document.body.appendChild(container);
+    return panel;
+  }
+
+  function createContractChatPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'evmole-chat-panel';
+    panel.innerHTML = `
+      <div class="evmole-chat-log" role="log" aria-live="polite">
+        <div class="evmole-chat-empty">Ask about this contract.</div>
+      </div>
+      <form class="evmole-chat-form">
+        <input class="evmole-chat-input" type="text" placeholder="Ask about this contract..." autocomplete="off" spellcheck="false">
+        <button class="evmole-chat-send" type="submit">Ask</button>
+      </form>
+    `;
+    document.body.appendChild(panel);
+    return panel;
   }
   
   function injectStyles(file) {
@@ -554,6 +606,253 @@ function escapeHtml(str) {
     }
   }
 
+  function getContractInfoText() {
+    const codeText = document.querySelector('#editor')?.textContent || '';
+    if (!codeText) return '';
+
+    const pragmaIndex = codeText.indexOf('pragma solidity');
+    if (pragmaIndex !== -1) {
+      const pragmaLineEnd = codeText.indexOf('\n', pragmaIndex);
+      if (pragmaLineEnd !== -1) {
+        const afterPragma = codeText.substring(pragmaLineEnd + 1);
+        const commentStart = afterPragma.indexOf('/*');
+        const commentEnd = commentStart === -1 ? -1 : afterPragma.indexOf('*/', commentStart);
+        if (commentEnd !== -1) {
+          return afterPragma.substring(commentStart, commentEnd + 2)
+            .replace(/\/\*+|\*+\/|^\s*\*\s?/gm, '')
+            .trim()
+            .slice(0, 4000);
+        }
+      }
+
+      return codeText.substring(0, pragmaIndex).trim().slice(0, 4000);
+    }
+
+    return '';
+  }
+
+  function stableStringify(value) {
+    if (Array.isArray(value)) {
+      return `[${value.map(stableStringify).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+      return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  async function sha256Hex(value) {
+    const bytes = new TextEncoder().encode(value);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function chromeMessage(message) {
+    return new Promise(resolve => {
+      if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+        resolve({ ok: false, error: 'Extension runtime is unavailable.' });
+        return;
+      }
+
+      chrome.runtime.sendMessage(message, response => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message || 'Extension message failed.' });
+          return;
+        }
+
+        resolve(response || { ok: false, error: 'No response from extension background worker.' });
+      });
+    });
+  }
+
+  async function fetchContractSummaryCache(settings, params) {
+    const baseUrl = getSignatureDatabaseBaseUrl(settings);
+    if (!baseUrl) return null;
+
+    const url = new URL(`${baseUrl}/contract-summaries`);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value);
+    });
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3500);
+    try {
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      if (!response.ok) return null;
+      const payload = await response.json();
+      return payload?.summary || null;
+    } catch (e) {
+      console.log('Contract summary cache lookup error:', e?.message || e);
+      return null;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function storeContractSummaryCache(settings, body) {
+    const baseUrl = getSignatureDatabaseBaseUrl(settings);
+    if (!baseUrl) return;
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3500);
+    try {
+      await fetch(`${baseUrl}/contract-summaries`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      console.log('Contract summary cache store error:', e?.message || e);
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function renderSummaryShell(state = 'idle', message = '') {
+    const label = state === 'cached'
+      ? 'Cached'
+      : (state === 'generated' ? 'Generated' : (state === 'loading' ? 'Loading' : 'OpenRouter'));
+    const statusClass = state === 'error' ? 'error' : (state === 'loading' ? 'loading' : '');
+    return `<div class="evmole-summary" data-state="${escapeHtml(state)}">
+      <div class="summary-header">
+        <div>
+          <div class="summary-title">Contract Summary</div>
+          <div class="summary-status ${statusClass}">${escapeHtml(message || label)}</div>
+        </div>
+        <div class="summary-actions">
+          <button type="button" class="summary-action summarize">Summarize</button>
+          <button type="button" class="summary-action retry" style="display:none;">Try again</button>
+          <button type="button" class="summary-action reload" title="Reload context" aria-label="Reload context" style="display:none;">↻</button>
+        </div>
+      </div>
+      <div class="summary-content"></div>
+    </div>`;
+  }
+
+  function renderSummaryList(items, limit = 3) {
+    const values = Array.isArray(items) ? items.filter(Boolean).slice(0, limit) : [];
+    if (values.length === 0) return '';
+    return `<ul>${values.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+  }
+
+  function getAddressFromSummaryFactValue(value) {
+    const match = String(value || '').match(/0x[a-fA-F0-9]{40}/);
+    return match ? match[0] : '';
+  }
+
+  function truncateAddress(address) {
+    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+  }
+
+  function renderSummaryFactValue(value) {
+    const rawValue = String(value || '');
+    const address = getAddressFromSummaryFactValue(rawValue);
+    if (!address) return escapeHtml(rawValue);
+    return `<button type="button" class="summary-fact-address" data-copy-address="${escapeHtml(address)}" title="${escapeHtml(address)}" aria-label="Copy ${escapeHtml(address)}">${escapeHtml(truncateAddress(address))}</button>`;
+  }
+
+  function renderSummaryFacts(facts) {
+    const values = Array.isArray(facts) ? facts.slice(0, 6).filter(fact => fact?.label || fact?.value) : [];
+    if (values.length === 0) return '';
+    return `<div class="summary-facts">${values.map(fact => `
+      <div class="summary-fact">
+        <div class="summary-fact-label">${escapeHtml(fact.label || 'Fact')}</div>
+        <div class="summary-fact-value">${renderSummaryFactValue(fact.value || '')}</div>
+        ${fact.source ? `<div class="summary-fact-source">${escapeHtml(fact.source)}</div>` : ''}
+      </div>
+    `).join('')}</div>`;
+  }
+
+  function formatElapsedTime(ms) {
+    const totalSeconds = Math.max(0, Math.round(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function renderSummaryResult(summary) {
+    const facts = Array.isArray(summary?.facts) ? summary.facts : [];
+    const readContext = Array.isArray(summary?.read_context) ? summary.read_context.slice(0, 3) : [];
+    const unknowns = Array.isArray(summary?.unknowns) ? summary.unknowns.slice(0, 3) : [];
+    const keyBehaviors = Array.isArray(summary?.key_behaviors) ? summary.key_behaviors.slice(0, 3) : [];
+    const limits = Array.isArray(summary?.limits_taxes_and_rules) ? summary.limits_taxes_and_rules.slice(0, 4) : [];
+    const controls = Array.isArray(summary?.privileged_controls) ? summary.privileged_controls.slice(0, 2) : [];
+    return `<div class="summary-result">
+      <div class="summary-meta">
+        <span>${escapeHtml(summary?.contract_type || 'unknown')}</span>
+        <span>${escapeHtml(summary?.confidence || 'low')} confidence</span>
+      </div>
+      ${renderSummaryFacts(facts)}
+      <p>${escapeHtml(summary?.summary || 'No summary returned.')}</p>
+      ${renderSummaryList(keyBehaviors)}
+      ${limits.length ? `<div class="summary-subhead">Limits/rules</div>${renderSummaryList(limits, 4)}` : ''}
+      ${controls.length ? `<div class="summary-subhead">Controls</div>${renderSummaryList(controls)}` : ''}
+      ${readContext.length ? `<div class="summary-subhead">Read context</div><ul>${readContext.map(entry => `<li><strong>${escapeHtml(entry.name || 'read')}</strong>: ${escapeHtml(entry.value || '')}${entry.meaning ? ` — ${escapeHtml(entry.meaning)}` : ''}</li>`).join('')}</ul>` : ''}
+      ${unknowns.length ? `<div class="summary-subhead">Unknowns</div><ul>${unknowns.map(entry => `<li><strong>${escapeHtml(entry.selector || 'unknown')}</strong>: ${escapeHtml(entry.reason || '')}${entry.suggested_next_read ? ` Next: ${escapeHtml(entry.suggested_next_read)}` : ''}</li>`).join('')}</ul>` : ''}
+    </div>`;
+  }
+
+  function setSummaryState(summaryPanel, state, { message = '', summary = null } = {}) {
+    const summaryEl = summaryPanel.querySelector('.evmole-summary');
+    if (!summaryEl) return;
+
+    summaryEl.dataset.state = state;
+    const statusEl = summaryEl.querySelector('.summary-status');
+    const contentEl = summaryEl.querySelector('.summary-content');
+    const summarizeBtn = summaryEl.querySelector('.summary-action.summarize');
+    const retryBtn = summaryEl.querySelector('.summary-action.retry');
+    const reloadBtn = summaryEl.querySelector('.summary-action.reload');
+
+    statusEl.className = `summary-status ${state === 'error' ? 'error' : (state === 'loading' ? 'loading' : '')}`;
+    statusEl.textContent = message || (state === 'cached' ? 'Cached' : (state === 'generated' ? 'Generated' : 'OpenRouter'));
+    contentEl.innerHTML = summary ? renderSummaryResult(summary) : '';
+
+    summarizeBtn.style.display = summary || state === 'loading' ? 'none' : '';
+    retryBtn.style.display = state === 'error' ? '' : 'none';
+    reloadBtn.style.display = summary ? '' : 'none';
+    summarizeBtn.disabled = state === 'loading';
+    retryBtn.disabled = state === 'loading';
+    reloadBtn.disabled = state === 'loading';
+  }
+
+  function bindSummaryFactCopy(summaryPanel) {
+    if (summaryPanel.dataset.factCopyBound === 'true') return;
+    summaryPanel.dataset.factCopyBound = 'true';
+    summaryPanel.addEventListener('click', event => {
+      const button = event.target.closest('.summary-fact-address');
+      if (!button || !summaryPanel.contains(button)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      const address = button.dataset.copyAddress || '';
+      if (!address) return;
+
+      navigator.clipboard?.writeText(address).then(() => {
+        const previous = button.textContent;
+        button.textContent = 'Copied';
+        button.classList.add('copied');
+        window.setTimeout(() => {
+          button.textContent = previous;
+          button.classList.remove('copied');
+        }, 900);
+      }).catch(() => {});
+    });
+  }
+
+  function renderChatText(value) {
+      return escapeHtml(value).replace(/\n/g, '<br>');
+    }
+
+    function svgToDataImage(svgText) {
+      const svg = String(svgText || '').trim();
+      if (!/^<svg[\s>]/i.test(svg)) return '';
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    }
+
   async function displayFunctionSelectors() {
     // Check if relevant elements exist before creating the panel
     const editorElement = document.querySelector('#editor');
@@ -564,6 +863,9 @@ function escapeHtml(str) {
     }
 
     const settings = await getExtensionSettings();
+    const summaryPanel = createSummaryPanel(renderSummaryShell('idle'));
+    bindSummaryFactCopy(summaryPanel);
+    const chatPanel = createContractChatPanel();
     const panel = createRightPanel('<div id="selectors">Loading...</div>', {
       defaultCollapsed: settings.contractFunctionsDefaultCollapsed
     });
@@ -613,6 +915,14 @@ function escapeHtml(str) {
 
     const contractAddress = getContractAddress();
     const linkScanRequestedSelectors = new Set();
+    const summaryReadRequests = new Map();
+    const chatToolReadRequests = new Map();
+    let latestSummaryContextBase = null;
+    let latestSummaryResult = null;
+    let autoSummaryHydrationKey = null;
+    let summaryCacheMissKey = null;
+    let autoSummaryAttempted = false;
+    const chatHistory = [];
     await postVerifiedAbiToSignatureDb(settings, contractAddress);
     injectScript('evmole-script.js', document.head || document.documentElement, {
       signatureDatabaseUrl: settings.signatureDatabaseUrl || '',
@@ -860,11 +1170,642 @@ function escapeHtml(str) {
       });
     }
 
-    const messageHandler = function(event) {
+    function renderPanelBody(selectorsHtml) {
+      panel.innerHTML = selectorsHtml;
+      if (latestSummaryResult) {
+        setSummaryState(summaryPanel, latestSummaryResult.source || 'generated', {
+          summary: latestSummaryResult.summary
+        });
+      }
+    }
+
+    function attachSummaryControls() {
+      const summaryEl = summaryPanel.querySelector('.evmole-summary');
+      if (!summaryEl || summaryEl.dataset.bound === 'true') return;
+      summaryEl.dataset.bound = 'true';
+
+      const summarize = () => generateContractSummary({ bypassCache: false, reloadContext: false });
+      summaryEl.querySelector('.summary-action.summarize')?.addEventListener('click', event => {
+        event.stopPropagation();
+        summarize();
+      });
+      summaryEl.querySelector('.summary-action.retry')?.addEventListener('click', event => {
+        event.stopPropagation();
+        generateContractSummary({ bypassCache: true, reloadContext: false });
+      });
+      summaryEl.querySelector('.summary-action.reload')?.addEventListener('click', event => {
+        event.stopPropagation();
+        generateContractSummary({ bypassCache: true, reloadContext: true });
+      });
+    }
+
+    function getFunctionName(record) {
+      return String(record?.signature || '').split('(')[0].toLowerCase();
+    }
+
+    function detectContractProfiles(functions) {
+      const names = new Set((functions || []).map(getFunctionName).filter(Boolean));
+      const has = (...candidates) => candidates.some(name => names.has(name) || [...names].some(existing => existing.includes(name)));
+      const profiles = [];
+
+      if (has('decimals', 'totalsupply', 'maxsupply', 'totalminted', 'balanceof', 'symbol', 'name', 'transfer')) profiles.push('token');
+      if (has('buytax', 'selltax', 'tax', 'fee', 'maxwallet', 'maxtx', 'tradingenabled', 'swapback', 'excludefromfees')) profiles.push('taxed_token');
+      if (has('contribute', 'contributionamount', 'maxraise', 'saleend', 'salestart', 'claimallocation', 'refund', 'finalize')) profiles.push('launch_sale');
+      if (has('bonding', 'curve', 'quote', 'reserve', 'graduat', 'sqrtprice', 'virtual')) profiles.push('bonding_curve');
+      if (has('tokenuri', 'nfttokenuri', 'baseuri', 'tokensofowner', 'royaltyinfo', 'mintprice', 'maxsupply')) profiles.push('nft');
+      if (has('deposit', 'withdraw', 'stake', 'unstake', 'reward', 'claimable', 'totalassets', 'asset', 'shares')) profiles.push('vault_staking');
+      if (has('router', 'factory', 'pair', 'pool', 'weth', 'poolmanager', 'hook')) profiles.push('router_pool');
+      if (has('implementation', 'admin', 'beacon', 'upgrade', 'mastercopy')) profiles.push('proxy');
+      if (has('quorum', 'proposal', 'voting', 'timelock', 'delay', 'executor', 'governor')) profiles.push('governance');
+
+      if (profiles.length === 0) profiles.push('unknown');
+      return [...new Set(profiles)];
+    }
+
+    function getAutoReadLimitForProfiles(profiles) {
+      let limit = SUMMARY_MIN_AUTO_READ_LIMIT;
+      const profileSet = new Set(profiles || []);
+      if (profileSet.has('token')) limit = Math.max(limit, 15);
+      if (profileSet.has('taxed_token') || profileSet.has('launch_sale') || profileSet.has('nft')) limit = Math.max(limit, 15);
+      if (profileSet.has('bonding_curve') || profileSet.has('vault_staking') || profileSet.has('governance')) limit = Math.max(limit, 20);
+      if (profileSet.size >= 3) limit = Math.max(limit, 18);
+      if (profileSet.has('unknown')) limit = Math.max(limit, 12);
+      return Math.min(limit, SUMMARY_MAX_AUTO_READ_LIMIT);
+    }
+
+    function readPriorityScore(record, profiles) {
+      if (!record?.isRead || record.args !== '()' || record.signature === 'Unknown') return -Infinity;
+      const name = getFunctionName(record);
+      const profileSet = new Set(profiles || []);
+      let score = 0;
+
+      const addIf = (weight, ...patterns) => {
+        if (patterns.some(pattern => name.includes(pattern))) score += weight;
+      };
+
+      if (name === 'decimals') score += 240;
+      if (name === 'symbol' || name === 'name') score += 85;
+      addIf(130, 'totalsupply', 'totalminted', 'maxsupply', 'circulatingsupply');
+      addIf(120, 'contributionamount', 'maxraise', 'maxcontributor', 'salestart', 'saleend', 'finalizeallowedat', 'readytofinalize');
+      addIf(115, 'buytax', 'selltax', 'tax', 'fee', 'maxwallet', 'maxtx', 'maxtransaction', 'tradingenabled', 'cooldown');
+      addIf(110, 'owner', 'admin', 'operator', 'manager', 'treasury', 'wallet');
+      addIf(100, 'router', 'factory', 'pair', 'pool', 'weth', 'token');
+      addIf(95, 'paused', 'enabled', 'finalized', 'aborted', 'launched');
+      addIf(90, 'min', 'max', 'limit', 'amount', 'cap');
+      addIf(85, 'bonding', 'curve', 'reserve', 'quote', 'price', 'supply', 'sqrtprice', 'graduat');
+      addIf(80, 'totalassets', 'asset', 'shares', 'reward', 'rate', 'period', 'lock');
+      addIf(75, 'tokenuri', 'baseuri', 'maxsupply', 'mintprice', 'royalty');
+      addIf(70, 'quorum', 'voting', 'proposal', 'timelock', 'delay');
+      addIf(50, 'count', 'total');
+
+      if (profileSet.has('launch_sale')) addIf(80, 'contribution', 'raise', 'sale', 'claim', 'refund', 'finalize', 'abort', 'operator');
+      if (profileSet.has('token')) addIf(80, 'decimals', 'supply', 'minted', 'symbol', 'name');
+      if (profileSet.has('taxed_token')) addIf(80, 'tax', 'fee', 'wallet', 'transaction', 'trading', 'swap', 'pair', 'router');
+      if (profileSet.has('bonding_curve')) addIf(80, 'bonding', 'curve', 'reserve', 'quote', 'price', 'supply', 'sqrt', 'graduat');
+      if (profileSet.has('nft')) addIf(70, 'tokenuri', 'baseuri', 'supply', 'mint', 'royalty', 'renderer');
+      if (profileSet.has('vault_staking')) addIf(70, 'asset', 'deposit', 'withdraw', 'stake', 'reward', 'claim', 'lock');
+      if (profileSet.has('governance')) addIf(70, 'quorum', 'vote', 'proposal', 'delay', 'timelock', 'threshold');
+      if (profileSet.has('proxy')) addIf(70, 'implementation', 'admin', 'beacon', 'mastercopy');
+
+      if (name.length <= 4) score -= 15;
+      return score;
+    }
+
+    function selectSummaryReadCandidates({ reloadContext }) {
+      const functions = latestSummaryContextBase?.functions || [];
+      const profiles = detectContractProfiles(functions);
+      const readQueryLimit = reloadContext ? SUMMARY_RELOAD_READ_LIMIT : getAutoReadLimitForProfiles(profiles);
+      const isTokenLike = profiles.includes('token') || functions.some(record => ['totalsupply', 'maxsupply', 'totalminted', 'balanceof'].includes(getFunctionName(record)));
+      const decimalsRecord = functions.find(record => record?.isRead && record.args === '()' && getFunctionName(record) === 'decimals')
+        || (isTokenLike ? {
+          selector: '0x313ce567',
+          args: '()',
+          mutability: 'view',
+          signature: 'decimals()',
+          isRead: true,
+          isUnknown: false,
+          synthetic: true
+        } : null);
+      const scored = functions
+        .map((record, index) => ({ record, index, score: readPriorityScore(record, profiles) }))
+        .filter(entry => entry.score > 0)
+        .sort((a, b) => b.score - a.score || a.index - b.index)
+        .slice(0, readQueryLimit)
+        .map(entry => entry.record);
+      if (decimalsRecord && !scored.some(record => record.selector === decimalsRecord.selector)) {
+        scored.unshift(decimalsRecord);
+        scored.splice(readQueryLimit);
+      }
+
+      return {
+        profiles,
+        readQueryLimit,
+        candidates: scored
+      };
+    }
+
+    async function hasOpenRouterApiKey() {
+      const response = await chromeMessage({ type: OPENROUTER_STATUS_TYPE });
+      return !!response?.ok && !!response.hasKey;
+    }
+
+    function requestSummaryRead(record, index, { timeoutMs, staggerMs }) {
+      return new Promise(resolve => {
+        const requestId = `summary-${Date.now()}-${index}-${record.selector.slice(2)}`;
+        const timeout = window.setTimeout(() => {
+          summaryReadRequests.delete(requestId);
+          resolve({
+            name: record.signature,
+            selector: record.selector,
+            success: false,
+            error: 'Read query timed out'
+          });
+        }, timeoutMs);
+
+        summaryReadRequests.set(requestId, payload => {
+          window.clearTimeout(timeout);
+          resolve({
+            name: record.signature,
+            selector: record.selector,
+            success: !!payload.success,
+            value: payload.success ? String(payload.result ?? '') : null,
+            error: payload.success ? null : String(payload.error || 'Read query failed')
+          });
+        });
+
+        window.setTimeout(() => {
+          if (!panel.isConnected) {
+            summaryReadRequests.delete(requestId);
+            window.clearTimeout(timeout);
+            resolve({
+              name: record.signature,
+              selector: record.selector,
+              success: false,
+              error: 'Panel closed'
+            });
+            return;
+          }
+
+          window.postMessage({
+            type: 'QUERY_READ_FUNCTION',
+            purpose: SUMMARY_READ_PURPOSE,
+            requestId,
+            selector: record.selector,
+            signature: record.signature,
+            contractAddress
+          }, '*');
+        }, index * staggerMs);
+      });
+    }
+
+    async function buildSummaryContext({ reloadContext = false } = {}) {
+      if (!latestSummaryContextBase) {
+        throw new Error('Function context is not ready yet.');
+      }
+
+      const selection = selectSummaryReadCandidates({ reloadContext });
+      const readQueryLimit = selection.readQueryLimit;
+      const readTimeoutMs = reloadContext ? SUMMARY_RELOAD_READ_TIMEOUT_MS : SUMMARY_AUTO_READ_TIMEOUT_MS;
+      const readStaggerMs = reloadContext ? SUMMARY_RELOAD_READ_STAGGER_MS : SUMMARY_AUTO_READ_STAGGER_MS;
+      const readCandidates = selection.candidates;
+      const readResults = await Promise.all(readCandidates.map((record, index) => requestSummaryRead(record, index, {
+        timeoutMs: readTimeoutMs,
+        staggerMs: readStaggerMs
+      })));
+
+      const context = {
+        ...latestSummaryContextBase,
+        sourceLinks: (panel.getAllDiscoveredLinks?.() || getContractSourceLinks()).slice(0, 30),
+        contractInfo: getContractInfoText(),
+        detectedProfiles: selection.profiles,
+        readQueryMode: 'profile-scored high-signal no-arg view/pure reads only',
+        readQueryLimit,
+        readQuerySelected: readCandidates.length,
+        readQueryTimeoutMs: readTimeoutMs,
+        reloadContext: !!reloadContext,
+        readResults
+      };
+      const contextHash = await sha256Hex(stableStringify({
+        chainHost: context.chainHost,
+        contractAddress: context.contractAddress,
+        implementationAddress: context.implementationAddress || null,
+        bytecodeSource: context.bytecodeSource || null,
+        functions: context.functions,
+        verifiedAbiHash: context.verifiedAbiHash || null,
+        contractInfo: context.contractInfo,
+        sourceLinks: context.sourceLinks
+      }));
+
+      return { context, contextHash };
+    }
+
+    async function buildChatContext() {
+      if (!latestSummaryContextBase) {
+        throw new Error('Function context is not ready yet.');
+      }
+
+      return {
+        ...latestSummaryContextBase,
+        sourceLinks: (panel.getAllDiscoveredLinks?.() || getContractSourceLinks()).slice(0, 20),
+        contractInfo: getContractInfoText(),
+        currentSummary: latestSummaryResult?.summary || null,
+        note: 'Chat context includes parsed function surface and current summary. It does not auto-query additional parameterized reads.'
+      };
+    }
+
+    async function buildSummaryCacheParams() {
+      if (!latestSummaryContextBase) {
+        throw new Error('Function context is not ready yet.');
+      }
+
+      const baseContext = {
+        ...latestSummaryContextBase,
+        sourceLinks: (panel.getAllDiscoveredLinks?.() || getContractSourceLinks()).slice(0, 30),
+        contractInfo: getContractInfoText()
+      };
+      const hashPayload = {
+        chainHost: baseContext.chainHost,
+        contractAddress: baseContext.contractAddress,
+        implementationAddress: baseContext.implementationAddress || null,
+        bytecodeSource: baseContext.bytecodeSource || null,
+        functions: baseContext.functions,
+        verifiedAbiHash: baseContext.verifiedAbiHash || null,
+        contractInfo: baseContext.contractInfo,
+        sourceLinks: baseContext.sourceLinks
+      };
+      const contextHash = await sha256Hex(stableStringify(hashPayload));
+      return {
+        chainHost: baseContext.chainHost,
+        contractAddress: baseContext.contractAddress,
+        implementationAddress: baseContext.implementationAddress || '',
+        contextHash,
+        model: SUMMARY_MODEL,
+        promptVersion: SUMMARY_PROMPT_VERSION
+      };
+    }
+
+    async function hydrateCachedSummary() {
+      if (!latestSummaryContextBase || latestSummaryResult) return;
+
+      try {
+        const cacheParams = await buildSummaryCacheParams();
+        const hydrationKey = stableStringify(cacheParams);
+        if (autoSummaryHydrationKey === hydrationKey) return;
+        autoSummaryHydrationKey = hydrationKey;
+        setSummaryState(summaryPanel, 'loading', { message: 'Checking cached summary...' });
+
+        const cached = await fetchContractSummaryCache(settings, cacheParams);
+
+        if (!cached?.summary_json || latestSummaryResult) return;
+
+        latestSummaryResult = { source: 'cached', summary: cached.summary_json };
+        setSummaryState(summaryPanel, 'cached', {
+          message: 'Cached summary',
+          summary: cached.summary_json
+        });
+      } catch (e) {
+        console.log('Cached summary hydration error:', e?.message || e);
+      } finally {
+        if (!latestSummaryResult) {
+          summaryCacheMissKey = autoSummaryHydrationKey;
+          setSummaryState(summaryPanel, 'idle');
+          maybeAutoGenerateSummary();
+        }
+      }
+    }
+
+    async function maybeAutoGenerateSummary() {
+      if (autoSummaryAttempted || latestSummaryResult || !latestSummaryContextBase) return;
+
+      autoSummaryAttempted = true;
+      try {
+        if (!await hasOpenRouterApiKey()) return;
+        await generateContractSummary({ bypassCache: false, reloadContext: false, automatic: true });
+      } catch (e) {
+        console.log('Auto summary error:', e?.message || e);
+      }
+    }
+
+    async function generateContractSummary({ bypassCache = false, reloadContext = false, automatic = false } = {}) {
+      const startedAt = performance.now();
+      try {
+        setSummaryState(summaryPanel, 'loading', { message: automatic ? 'Auto summarizing...' : (reloadContext ? 'Reloading context...' : 'Building context...') });
+        let cacheParams = null;
+        if (!bypassCache && !reloadContext) {
+          cacheParams = await buildSummaryCacheParams();
+          const cacheKey = stableStringify(cacheParams);
+          if (summaryCacheMissKey !== cacheKey) {
+            const cached = await fetchContractSummaryCache(settings, cacheParams);
+            if (cached?.summary_json) {
+              latestSummaryResult = { source: 'cached', summary: cached.summary_json };
+              setSummaryState(summaryPanel, 'cached', {
+                message: 'Cached summary',
+                summary: cached.summary_json
+              });
+              return;
+            }
+            summaryCacheMissKey = cacheKey;
+          }
+        }
+
+        const { context, contextHash } = await buildSummaryContext({ reloadContext });
+        cacheParams = {
+          chainHost: context.chainHost,
+          contractAddress: context.contractAddress,
+          implementationAddress: context.implementationAddress || '',
+          contextHash,
+          model: SUMMARY_MODEL,
+          promptVersion: SUMMARY_PROMPT_VERSION
+        };
+
+        setSummaryState(summaryPanel, 'loading', { message: 'Asking OpenRouter...' });
+        const response = await chromeMessage({
+          type: OPENROUTER_SUMMARY_TYPE,
+          context,
+          dedupeKey: stableStringify(cacheParams)
+        });
+
+        if (!response?.ok) {
+          throw new Error(response?.error || 'OpenRouter summary failed.');
+        }
+
+        latestSummaryResult = { source: 'generated', summary: response.summary };
+        setSummaryState(summaryPanel, 'generated', {
+          message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)}`,
+          summary: response.summary
+        });
+
+        await storeContractSummaryCache(settings, {
+          ...cacheParams,
+          chainHost: context.chainHost,
+          contractAddress: context.contractAddress,
+          implementationAddress: context.implementationAddress || null,
+          summary: response.summary
+        });
+      } catch (error) {
+        setSummaryState(summaryPanel, 'error', { message: error?.message || String(error) });
+      }
+    }
+
+    function setChatOpen(open) {
+      chatPanel.classList.toggle('open', open);
+      if (open) {
+        chatPanel.querySelector('.evmole-chat-input')?.focus();
+      }
+    }
+
+    function appendChatMessage(role, content, { loading = false } = {}) {
+      const log = chatPanel.querySelector('.evmole-chat-log');
+      log.querySelector('.evmole-chat-empty')?.remove();
+      const item = document.createElement('div');
+      item.className = `evmole-chat-message ${role}${loading ? ' loading' : ''}`;
+      item.innerHTML = renderChatText(content);
+      log.appendChild(item);
+      log.scrollTop = log.scrollHeight;
+      return item;
+    }
+
+    function isTokenUriQuestion(question) {
+      return /\b(?:nft|token\s*uri|tokenuri|metadata|image|svg|animation)\b/i.test(question);
+    }
+
+    function extractTokenId(question) {
+      const text = String(question || '');
+      const specific = text.match(/\btoken(?:\s*id)?\s*(?:#|:|=)?\s*(\d+)\b/i)
+        || text.match(/#\s*(\d+)\b/)
+        || text.match(/\bid\s*(?:#|:|=)?\s*(\d+)\b/i);
+      if (specific) return specific[1];
+      const generic = text.match(/\b(\d{1,78})\b/);
+      return generic ? generic[1] : null;
+    }
+
+    function findTokenUriReadFunction() {
+      const functions = latestSummaryContextBase?.functions || [];
+      return functions.find(record => {
+        const name = String(record?.signature || '').split('(')[0].toLowerCase();
+        const paramTypes = splitTopLevelAbiTypes(record?.args || '').map(normalizeAbiType).filter(Boolean);
+        return record?.isRead
+          && record.signature !== 'Unknown'
+          && (name === 'tokenuri' || name === 'nfttokenuri' || name.endsWith('tokenuri'))
+          && paramTypes.length === 1
+          && /^uint(?:[0-9]+)?$/.test(paramTypes[0]);
+      }) || null;
+    }
+
+    function queryChatReadFunction(record, inputValues) {
+      return new Promise(resolve => {
+        const inputTypes = splitTopLevelAbiTypes(record.args || '').map(normalizeAbiType).filter(Boolean);
+        const requestId = `chat-tool-${Date.now()}-${record.selector.slice(2)}`;
+        const timeout = window.setTimeout(() => {
+          chatToolReadRequests.delete(requestId);
+          resolve({
+            success: false,
+            selector: record.selector,
+            signature: record.signature,
+            error: 'Read query timed out'
+          });
+        }, 10000);
+
+        chatToolReadRequests.set(requestId, payload => {
+          window.clearTimeout(timeout);
+          resolve({
+            success: !!payload.success,
+            selector: record.selector,
+            signature: record.signature,
+            result: payload.success ? String(payload.result ?? '') : null,
+            error: payload.success ? null : String(payload.error || 'Read query failed')
+          });
+        });
+
+        window.postMessage({
+          type: 'QUERY_READ_FUNCTION',
+          purpose: CHAT_TOOL_READ_PURPOSE,
+          requestId,
+          selector: record.selector,
+          signature: record.signature,
+          contractAddress,
+          inputTypes,
+          inputValues
+        }, '*');
+      });
+    }
+
+    function getMetadataAssetUri(metadata) {
+      if (!metadata || typeof metadata !== 'object') return '';
+      return String(metadata.image || metadata.image_url || metadata.animation_url || '').trim();
+    }
+
+    function compactTokenFetchResult(result) {
+      if (!result?.ok) return result;
+      const text = String(result.text || '');
+      return {
+        ok: true,
+        uri: result.uri,
+        fetchedUri: result.fetchedUri,
+        contentType: result.contentType || '',
+        json: result.json || null,
+        textPreview: text.slice(0, 4000)
+      };
+    }
+
+    function getTokenPreviewImageSrc(toolContext) {
+      if (!toolContext || toolContext.kind !== 'token_uri_fetch') return '';
+      const asset = toolContext.assetResource?.ok ? toolContext.assetResource : null;
+      const token = toolContext.tokenResource?.ok ? toolContext.tokenResource : null;
+
+      if (asset) {
+        const assetUri = String(toolContext.assetUri || asset.uri || '').trim();
+        const assetText = String(asset.textPreview || '');
+        if (/^data:image\//i.test(assetUri)) return assetUri;
+        if (/^https?:\/\//i.test(asset.fetchedUri || assetUri) && /^image\//i.test(asset.contentType || '')) {
+          return asset.fetchedUri || assetUri;
+        }
+        if (/svg/i.test(asset.contentType || '') || /^<svg[\s>]/i.test(assetText.trim())) {
+          return svgToDataImage(assetText);
+        }
+      }
+
+      if (token) {
+        const tokenText = String(token.textPreview || '');
+        const tokenUri = String(toolContext.tokenUri || token.uri || '').trim();
+        if (/^data:image\//i.test(tokenUri)) return tokenUri;
+        if (/svg/i.test(token.contentType || '') || /^<svg[\s>]/i.test(tokenText.trim())) {
+          return svgToDataImage(tokenText);
+        }
+      }
+
+      return '';
+    }
+
+    function renderTokenToolPreview(toolContext) {
+      const src = getTokenPreviewImageSrc(toolContext);
+      if (!src) return '';
+      const tokenId = escapeHtml(toolContext.tokenId || '');
+      return `<div class="evmole-chat-token-preview">
+        <div class="evmole-chat-token-preview-label">Token ${tokenId} preview</div>
+        <img src="${escapeHtml(src)}" alt="Token ${tokenId} preview" loading="lazy">
+      </div>`;
+    }
+
+    async function buildChatToolContext(question) {
+      if (!isTokenUriQuestion(question)) return null;
+
+      const tokenUriFunction = findTokenUriReadFunction();
+      if (!tokenUriFunction) return null;
+
+      const tokenId = extractTokenId(question);
+      if (!tokenId) {
+        return {
+          kind: 'missing_token_id',
+          message: 'Which token ID should I use?'
+        };
+      }
+
+      const read = await queryChatReadFunction(tokenUriFunction, [tokenId]);
+      if (!read.success) {
+        return {
+          kind: 'token_uri_read',
+          tokenId,
+          function: tokenUriFunction.signature,
+          read
+        };
+      }
+
+      const tokenUri = String(read.result || '').trim();
+      const tokenResource = await chromeMessage({
+        type: FETCH_TOKEN_URI_TYPE,
+        uri: tokenUri
+      });
+
+      let assetResource = null;
+      const assetUri = getMetadataAssetUri(tokenResource?.json);
+      if (assetUri) {
+        assetResource = await chromeMessage({
+          type: FETCH_TOKEN_URI_TYPE,
+          uri: assetUri
+        });
+      }
+
+      return {
+        kind: 'token_uri_fetch',
+        tokenId,
+        function: tokenUriFunction.signature,
+        read,
+        tokenUri,
+        tokenResource: compactTokenFetchResult(tokenResource),
+        assetUri,
+        assetResource: compactTokenFetchResult(assetResource)
+      };
+    }
+
+    async function submitChatQuestion(question) {
+      const trimmed = String(question || '').trim();
+      if (!trimmed) return;
+
+      appendChatMessage('user', trimmed);
+      chatHistory.push({ role: 'user', content: trimmed });
+
+      const loadingItem = appendChatMessage('assistant', 'Thinking...', { loading: true });
+      try {
+        const context = await buildChatContext();
+        const toolContext = await buildChatToolContext(trimmed);
+        if (toolContext?.kind === 'missing_token_id') {
+          loadingItem.classList.remove('loading');
+          loadingItem.innerHTML = renderChatText(toolContext.message);
+          chatHistory.push({ role: 'assistant', content: toolContext.message });
+          return;
+        }
+        if (toolContext) {
+          context.toolContext = toolContext;
+        }
+        const response = await chromeMessage({
+          type: OPENROUTER_CHAT_TYPE,
+          question: trimmed,
+          context,
+          history: chatHistory.slice(0, -1)
+        });
+
+        if (!response?.ok) {
+          throw new Error(response?.error || 'OpenRouter chat failed.');
+        }
+
+        loadingItem.classList.remove('loading');
+        loadingItem.innerHTML = `${renderTokenToolPreview(toolContext)}${renderChatText(response.answer)}`;
+        chatHistory.push({ role: 'assistant', content: response.answer });
+      } catch (error) {
+        loadingItem.classList.remove('loading');
+        loadingItem.classList.add('error');
+        loadingItem.innerHTML = renderChatText(error?.message || String(error));
+      }
+    }
+
+    chatPanel.querySelector('.evmole-chat-form')?.addEventListener('submit', event => {
+      event.preventDefault();
+      const input = chatPanel.querySelector('.evmole-chat-input');
+      const question = input.value;
+      input.value = '';
+      submitChatQuestion(question);
+    });
+
+    document.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') {
+        const target = event.target;
+        const isEditable = target?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName);
+        if (!isEditable || chatPanel.contains(target)) {
+          event.preventDefault();
+          setChatOpen(!chatPanel.classList.contains('open'));
+        }
+      }
+    });
+
+    attachSummaryControls();
+
+    const messageHandler = async function(event) {
       if (event.data && event.data.type === 'FUNCTION_SELECTORS_RESULT') {
         if (event.data.selectors && Array.isArray(event.data.selectors) && event.data.selectors.length > 0) {
           const readFunctions = [];
           const writeFunctions = [];
+          const selectorRecords = [];
 
           event.data.selectors.forEach(selector => {
             if (typeof selector !== 'string') return;
@@ -918,6 +1859,15 @@ function escapeHtml(str) {
               </div>
             `;
 
+            selectorRecords.push({
+              selector: selectorId,
+              args,
+              mutability,
+              signature: functionName,
+              isRead: isReadFunction,
+              isUnknown: functionName === 'Unknown'
+            });
+
             if (isReadFunction) {
               readFunctions.push(itemHtml);
             } else {
@@ -950,7 +1900,33 @@ function escapeHtml(str) {
           }
 
           if (panel && panel.parentNode) {
-            panel.innerHTML = selectorsHtml;
+            const verifiedAbi = getVerifiedContractAbi();
+            const verifiedFunctions = Array.isArray(verifiedAbi)
+              ? verifiedAbi.filter(entry => entry?.type === 'function').slice(0, 200)
+              : [];
+            latestSummaryContextBase = {
+              promptVersion: SUMMARY_PROMPT_VERSION,
+              model: SUMMARY_MODEL,
+              chainHost: window.location.hostname,
+              pageUrl: window.location.href,
+              contractAddress,
+              implementationAddress: event.data.implementationAddress || null,
+              bytecodeSource: event.data.bytecodeSource || null,
+              counts: {
+                functions: selectorRecords.length,
+                read: selectorRecords.filter(record => record.isRead).length,
+                write: selectorRecords.filter(record => !record.isRead).length,
+                unknown: selectorRecords.filter(record => record.isUnknown).length
+              },
+              functions: selectorRecords,
+              verifiedAbi: verifiedFunctions,
+              verifiedAbiHash: verifiedFunctions.length
+                ? await sha256Hex(stableStringify(verifiedFunctions))
+                : null
+            };
+
+            renderPanelBody(`<div id="selectors">${selectorsHtml}</div>`);
+            hydrateCachedSummary();
 
             // Add click handlers for queryable functions
             panel.querySelectorAll('.selector-item.queryable').forEach(item => {
@@ -1051,7 +2027,7 @@ function escapeHtml(str) {
           }
         } else if (panel && panel.parentNode) {
           const errorMsg = event.data.error || 'No function selectors found';
-          panel.innerHTML = `<div class="error-notice">${errorMsg}</div>`;
+          renderPanelBody(`<div id="selectors"><div class="error-notice">${escapeHtml(errorMsg)}</div></div>`);
         }
       }
 
@@ -1063,6 +2039,22 @@ function escapeHtml(str) {
           panel.addDiscoveredLinks?.(extractLinksFromResultValue(linkScanValue));
         }
         if (purpose === 'LINK_SCAN') return;
+        if (purpose === SUMMARY_READ_PURPOSE) {
+          const resolver = summaryReadRequests.get(event.data.requestId);
+          if (resolver) {
+            summaryReadRequests.delete(event.data.requestId);
+            resolver(event.data);
+          }
+          return;
+        }
+        if (purpose === CHAT_TOOL_READ_PURPOSE) {
+          const resolver = chatToolReadRequests.get(event.data.requestId);
+          if (resolver) {
+            chatToolReadRequests.delete(event.data.requestId);
+            resolver(event.data);
+          }
+          return;
+        }
 
         const item = panel.querySelector(`.selector-item[data-selector="${selector}"]`);
         if (item) {

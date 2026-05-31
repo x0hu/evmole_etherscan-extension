@@ -8,6 +8,9 @@ const statusEl = document.getElementById('status');
 const radios = Array.from(document.querySelectorAll('input[name="contractFunctionsDefault"]'));
 const signatureDatabaseUrlInput = document.getElementById('signatureDatabaseUrl');
 const signatureDatabaseStoreUnknownsInput = document.getElementById('signatureDatabaseStoreUnknowns');
+const openRouterApiKeyInput = document.getElementById('openRouterApiKey');
+const saveOpenRouterApiKeyButton = document.getElementById('saveOpenRouterApiKey');
+const clearOpenRouterApiKeyButton = document.getElementById('clearOpenRouterApiKey');
 let statusTimer;
 
 function setStatus(message) {
@@ -44,6 +47,10 @@ function hasChromeStorage() {
   return typeof chrome !== 'undefined' && !!chrome.storage?.sync;
 }
 
+function hasChromeLocalStorage() {
+  return typeof chrome !== 'undefined' && !!chrome.storage?.local;
+}
+
 function restoreSettings() {
   if (!hasChromeStorage()) {
     selectDefaultState(DEFAULT_SETTINGS.contractFunctionsDefaultCollapsed);
@@ -61,6 +68,18 @@ function restoreSettings() {
     signatureDatabaseUrlInput.value = settings.signatureDatabaseUrl || '';
     signatureDatabaseStoreUnknownsInput.checked = !!settings.signatureDatabaseStoreUnknowns;
   });
+
+  if (hasChromeLocalStorage()) {
+    chrome.storage.local.get({ openRouterApiKey: '' }, settings => {
+      if (chrome.runtime.lastError) {
+        setStatus('Could not load OpenRouter key.');
+        return;
+      }
+
+      openRouterApiKeyInput.value = settings.openRouterApiKey ? '••••••••••••••••' : '';
+      openRouterApiKeyInput.dataset.hasSavedKey = settings.openRouterApiKey ? 'true' : 'false';
+    });
+  }
 }
 
 function saveDefaultState(value) {
@@ -108,6 +127,49 @@ function saveSignatureDatabaseSettings() {
   });
 }
 
+function saveOpenRouterApiKey() {
+  const openRouterApiKey = openRouterApiKeyInput.value.trim();
+  if (!openRouterApiKey || openRouterApiKey === '••••••••••••••••') {
+    setStatus(openRouterApiKeyInput.dataset.hasSavedKey === 'true' ? 'OpenRouter key unchanged.' : 'Enter an OpenRouter key.');
+    return;
+  }
+
+  if (!hasChromeLocalStorage()) {
+    setStatus('Saved.');
+    return;
+  }
+
+  chrome.storage.local.set({ openRouterApiKey }, () => {
+    if (chrome.runtime.lastError) {
+      setStatus('Could not save OpenRouter key.');
+      return;
+    }
+
+    openRouterApiKeyInput.value = '••••••••••••••••';
+    openRouterApiKeyInput.dataset.hasSavedKey = 'true';
+    setStatus('OpenRouter key saved.');
+  });
+}
+
+function clearOpenRouterApiKey() {
+  openRouterApiKeyInput.value = '';
+  openRouterApiKeyInput.dataset.hasSavedKey = 'false';
+
+  if (!hasChromeLocalStorage()) {
+    setStatus('Cleared.');
+    return;
+  }
+
+  chrome.storage.local.remove('openRouterApiKey', () => {
+    if (chrome.runtime.lastError) {
+      setStatus('Could not clear OpenRouter key.');
+      return;
+    }
+
+    setStatus('OpenRouter key cleared.');
+  });
+}
+
 radios.forEach(radio => {
   radio.addEventListener('change', event => {
     saveDefaultState(event.target.value);
@@ -117,5 +179,12 @@ radios.forEach(radio => {
 signatureDatabaseUrlInput.addEventListener('change', saveSignatureDatabaseSettings);
 signatureDatabaseUrlInput.addEventListener('blur', saveSignatureDatabaseSettings);
 signatureDatabaseStoreUnknownsInput.addEventListener('change', saveSignatureDatabaseSettings);
+saveOpenRouterApiKeyButton.addEventListener('click', saveOpenRouterApiKey);
+clearOpenRouterApiKeyButton.addEventListener('click', clearOpenRouterApiKey);
+openRouterApiKeyInput.addEventListener('focus', () => {
+  if (openRouterApiKeyInput.dataset.hasSavedKey === 'true') {
+    openRouterApiKeyInput.value = '';
+  }
+});
 
 restoreSettings();
