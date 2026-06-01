@@ -30,6 +30,7 @@ function escapeHtml(str) {
   const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
   const OPENROUTER_CHAT_TYPE = 'EVMOLE_OPENROUTER_CHAT';
   const CODEX_SUMMARY_TYPE = 'EVMOLE_CODEX_SUMMARY';
+  const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
   const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
   const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
   const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
@@ -3498,15 +3499,43 @@ function escapeHtml(str) {
             note: 'Related contracts are previously seen contracts from the same contract creator/deployer. Use them to explain integration patterns only when evidence supports it.'
           };
         }
-        const response = await chromeMessage({
-          type: OPENROUTER_CHAT_TYPE,
-          question: trimmed,
-          context,
-          history: chatHistory.slice(0, -1)
-        });
+        const selectedProvider = getSummaryProvider();
+        let providerUsed = selectedProvider;
+        let response;
+        if (selectedProvider === 'codex') {
+          loadingItem.innerHTML = renderChatText('Asking Codex...');
+          response = await chromeMessage({
+            type: CODEX_CHAT_TYPE,
+            question: trimmed,
+            context,
+            history: chatHistory.slice(0, -1),
+            fastMode: !!settings.codexFastMode,
+            reasoningEffort: 'low'
+          });
+          if (!response?.ok && await hasOpenRouterApiKey()) {
+            const codexError = String(response?.error || 'unknown error');
+            console.warn('Codex chat failed, falling back to OpenRouter:', codexError, response);
+            providerUsed = 'openrouter';
+            loadingItem.innerHTML = renderChatText(`Codex failed: ${codexError.slice(0, 90)}. Asking OpenRouter...`);
+            response = await chromeMessage({
+              type: OPENROUTER_CHAT_TYPE,
+              question: trimmed,
+              context,
+              history: chatHistory.slice(0, -1)
+            });
+          }
+        } else {
+          loadingItem.innerHTML = renderChatText('Asking OpenRouter...');
+          response = await chromeMessage({
+            type: OPENROUTER_CHAT_TYPE,
+            question: trimmed,
+            context,
+            history: chatHistory.slice(0, -1)
+          });
+        }
 
         if (!response?.ok) {
-          throw new Error(response?.error || 'OpenRouter chat failed.');
+          throw new Error(response?.error || `${providerUsed === 'codex' ? 'Codex' : 'OpenRouter'} chat failed.`);
         }
 
         loadingItem.classList.remove('loading');

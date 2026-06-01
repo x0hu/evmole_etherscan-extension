@@ -5,6 +5,7 @@ const OPENROUTER_SUMMARY_TYPE = 'EVMOLE_OPENROUTER_SUMMARY';
 const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
 const OPENROUTER_CHAT_TYPE = 'EVMOLE_OPENROUTER_CHAT';
 const CODEX_SUMMARY_TYPE = 'EVMOLE_CODEX_SUMMARY';
+const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
 const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
 const CODEX_LOGIN_TYPE = 'EVMOLE_CODEX_LOGIN';
 const CODEX_LOGOUT_TYPE = 'EVMOLE_CODEX_LOGOUT';
@@ -30,6 +31,7 @@ const TOKEN_URI_FETCH_TIMEOUT_MS = 8500;
 const TOKEN_URI_MAX_BYTES = 1024 * 1024;
 const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
 const SUMMARY_SYSTEM_PROMPT = `You are Evmole's concise EVM contract analyst. Use only the supplied evidence. Do not invent behavior from function names alone. Prioritize interpreted facts and numbers first: contribution amounts, max raise, min/max buys, taxes/fees, timestamps, cooldowns, bonding-curve parameters, routers/pairs, and privileged roles. Convert wei/token units and epoch timestamps when direct evidence supports the conversion. For token amounts, never assume decimals: only convert raw token integers when a decimals() read result is present in the evidence. Keep prose short and put explanations after facts. Never claim safety or give investment advice. Return only valid json.`;
+const CHAT_SYSTEM_PROMPT = 'You are Evmole contract chat. Answer questions about the current EVM contract using only the supplied evidence, toolContext, relatedContracts, mentionedContracts, and prior chat. Be concise. If mentionedContracts are provided, compare the explicitly mentioned contracts to the current contract even when creator/deployer evidence differs or is missing. If relatedContracts are provided, compare only the supplied contracts and explain how they may fit together from creator, summaries, facts, function counts, and explicit evidence; do not infer integration beyond evidence. If toolContext contains NFT metadata, image, SVG, or JSON, summarize the fetched facts directly without naming internal read functions unless the user asks. If evidence is missing, ask for the missing value plainly. Do not claim safety or give investment advice.';
 const openRouterSummaryInFlight = new Map();
 const SUMMARY_USER_PROMPT_PREFIX = `Analyze this EVM contract from the supplied evidence.
 
@@ -834,6 +836,42 @@ function buildCodexSummaryRequestBody(context, { fastMode = false, reasoningEffo
     return body;
 }
 
+function buildCodexChatRequestBody({ question, context, history, fastMode = false, reasoningEffort = 'low' } = {}) {
+    const body = {
+        model: CODEX_MODEL,
+        store: false,
+        stream: true,
+        instructions: CHAT_SYSTEM_PROMPT,
+        input: [
+            {
+                role: 'user',
+                content: [
+                    {
+                        type: 'input_text',
+                        text: [
+                            `Contract evidence JSON:\n${JSON.stringify(context)}`,
+                            `Prior chat JSON:\n${JSON.stringify((history || []).map(entry => ({
+                                role: entry.role === 'assistant' ? 'assistant' : 'user',
+                                content: String(entry.content || '').slice(0, 2000)
+                            })))}`,
+                            `Question:\n${question}`
+                        ].join('\n\n')
+                    }
+                ]
+            }
+        ],
+        reasoning: { effort: normalizeCodexReasoningEffort(reasoningEffort) },
+        text: { verbosity: 'low' },
+        max_output_tokens: 1200,
+    };
+
+    if (fastMode) {
+        body.service_tier = 'priority';
+    }
+
+    return body;
+}
+
 function extractCodexResponseText(response) {
     const parts = [];
     const visit = value => {
@@ -1142,7 +1180,7 @@ async function handleOpenRouterChat(message, sendResponse) {
                 messages: [
                     {
                         role: 'system',
-                        content: 'You are Evmole contract chat. Answer questions about the current EVM contract using only the supplied evidence, toolContext, relatedContracts, mentionedContracts, and prior chat. Be concise. If mentionedContracts are provided, compare the explicitly mentioned contracts to the current contract even when creator/deployer evidence differs or is missing. If relatedContracts are provided, compare only the supplied contracts and explain how they may fit together from creator, summaries, facts, function counts, and explicit evidence; do not infer integration beyond evidence. If toolContext contains NFT metadata, image, SVG, or JSON, summarize the fetched facts directly without naming internal read functions unless the user asks. If evidence is missing, ask for the missing value plainly. Do not claim safety or give investment advice.'
+                        content: CHAT_SYSTEM_PROMPT
                     },
                     {
                         role: 'user',
@@ -1178,6 +1216,101 @@ async function handleOpenRouterChat(message, sendResponse) {
         sendResponse({ ok: false, error: message });
     } finally {
         clearTimeout(timeout);
+    }
+}
+
+async function fetchCodexChat(credentials, { question, context, history, fastMode = false, reasoningEffort = 'low' } = {}) {
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CODEX_TIMEOUT_MS);
+    const body = JSON.stringify(buildCodexChatRequestBody({ question, context, history, fastMode, reasoningEffort }));
+    const requestBodyBytes = new TextEncoder().encode(body).byteLength;
+    const contextBytes = new TextEncoder().encode(JSON.stringify(context || {})).byteLength;
+
+    try {
+        const response = await fetch(CODEX_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${credentials.access}`,
+                'chatgpt-account-id': credentials.accountId,
+                'originator': 'evmole',
+                'OpenAI-Beta': 'responses=experimental',
+                'accept': 'text/event-stream',
+                'content-type': 'application/json',
+            },
+            signal: controller.signal,
+            body,
+        });
+        const responseHeadersMs = Date.now() - startedAt;
+        const responseHeaderDiagnostics = {
+            requestId: response.headers.get('x-request-id') || response.headers.get('openai-request-id') || '',
+            cfRay: response.headers.get('cf-ray') || '',
+            contentType: response.headers.get('content-type') || '',
+            serverTiming: response.headers.get('server-timing') || '',
+        };
+
+        if (!response.ok) {
+            const errorText = await response.text().catch(() => '');
+            throw new Error(`Codex chat failed with HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 240)}` : ''}`);
+        }
+
+        const { text: answer, timing: sseTiming } = await readCodexSseText(response, controller.signal, { startedAt });
+        if (!answer) throw new Error('Codex returned an empty chat response.');
+
+        const timing = {
+            totalMs: Date.now() - startedAt,
+            requestBodyBytes,
+            contextBytes,
+            responseHeadersMs,
+            responseHeaders: responseHeaderDiagnostics,
+            outputChars: answer.length,
+            fastMode: !!fastMode,
+            reasoningEffort: normalizeCodexReasoningEffort(reasoningEffort),
+            ...sseTiming,
+        };
+
+        return {
+            ok: true,
+            answer,
+            model: fastMode ? CODEX_PRIORITY_MODEL_LABEL : CODEX_MODEL,
+            usage: null,
+            timing,
+        };
+    } catch (error) {
+        if (error?.name === 'AbortError') {
+            throw new Error(`Codex chat timed out after ${CODEX_TIMEOUT_MS / 1000}s`);
+        }
+        throw error;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function handleCodexChat(message, sendResponse) {
+    const question = String(message?.question || '').trim();
+    const context = message?.context;
+    const history = Array.isArray(message?.history) ? message.history.slice(-8) : [];
+
+    if (!question) {
+        sendResponse({ ok: false, error: 'Ask a question first.' });
+        return;
+    }
+    if (!context || typeof context !== 'object') {
+        sendResponse({ ok: false, error: 'Contract context is not ready yet.' });
+        return;
+    }
+
+    try {
+        const credentials = await getValidCodexCredentials();
+        sendResponse(await fetchCodexChat(credentials, {
+            question,
+            context,
+            history,
+            fastMode: !!message?.fastMode,
+            reasoningEffort: normalizeCodexReasoningEffort(message?.reasoningEffort),
+        }));
+    } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
     }
 }
 
@@ -1233,6 +1366,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message?.type === OPENROUTER_CHAT_TYPE) {
         handleOpenRouterChat(message, sendResponse);
+        return true;
+    }
+
+    if (message?.type === CODEX_CHAT_TYPE) {
+        handleCodexChat(message, sendResponse);
         return true;
     }
 
