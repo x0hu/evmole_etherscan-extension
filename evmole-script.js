@@ -1031,6 +1031,26 @@ window.addEventListener('message', async (event) => {
       formatted
     }, '*');
   }
+  if (event.data?.type === 'ANALYZE_CONTRACT_ADDRESS') {
+    const { contractAddress, requestId } = event.data;
+    try {
+      const result = await analyzeContractAddress(contractAddress);
+      window.postMessage({
+        type: 'ANALYZE_CONTRACT_ADDRESS_RESULT',
+        requestId,
+        success: true,
+        ...result
+      }, '*');
+    } catch (e) {
+      window.postMessage({
+        type: 'ANALYZE_CONTRACT_ADDRESS_RESULT',
+        requestId,
+        success: false,
+        contractAddress,
+        error: e.message || String(e)
+      }, '*');
+    }
+  }
 });
 
 async function fetchSignatures(selectors) {
@@ -1064,6 +1084,78 @@ async function fetchSignatures(selectors) {
     console.log('Signature lookup error:', e);
     return localSignatures;
   }
+}
+
+async function analyzeContractAddress(targetAddress) {
+  const normalizedAddress = String(targetAddress || '').trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(normalizedAddress)) {
+    throw new Error('Invalid contract address');
+  }
+
+  const fetched = await hedgedGetCode(normalizedAddress, { maxRpcs: 3, staggerMs: 100 });
+  const code = fetched.code;
+  if (!code || code === '0x') {
+    throw new Error('No bytecode found');
+  }
+  if (!code.startsWith('0x')) {
+    throw new Error('Source code compilation not implemented');
+  }
+
+  let implInfo = null;
+  let bytecodeToAnalyze = code;
+  const initialSelectors = functionSelectors(code);
+  const isSafeRuntime = isSafeProxyRuntimeBytecode(code);
+
+  if (initialSelectors.length === 0 && isSafeRuntime) {
+    return {
+      contractAddress: normalizedAddress,
+      selectors: SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail),
+      implementationAddress: null,
+      bytecodeSource: 'rpc',
+      rpc: fetched.rpc || null
+    };
+  }
+
+  if (initialSelectors.length < PROXY_SELECTOR_THRESHOLD) {
+    implInfo = await getImplementationBytecode(normalizedAddress, code);
+    if (implInfo) {
+      bytecodeToAnalyze = implInfo.bytecode;
+    }
+  }
+
+  const selectors = bytecodeToAnalyze === code ? initialSelectors : functionSelectors(bytecodeToAnalyze);
+  const signatures = await fetchSignatures(selectors);
+  await storeSelectorObservations(
+    selectors.map(selector => ({
+      selector: selector.startsWith('0x') ? selector : `0x${selector}`,
+      arguments: functionArguments(bytecodeToAnalyze, selector),
+      stateMutability: functionStateMutability(bytecodeToAnalyze, selector)
+    })),
+    signatures,
+    normalizedAddress
+  );
+
+  let selectorsWithDetails = await Promise.all(selectors.map(async selector => {
+    const args = functionArguments(bytecodeToAnalyze, selector);
+    const mutability = functionStateMutability(bytecodeToAnalyze, selector);
+    const formattedSelector = selector.startsWith('0x') ? selector : `0x${selector}`;
+    const signatureInfo = signatures[formattedSelector] && signatures[formattedSelector][0]
+      ? signatures[formattedSelector][0].name
+      : 'Unknown';
+    return `${formattedSelector}: (${args}) ${mutability}\n    ${signatureInfo}`;
+  }));
+
+  if (selectorsWithDetails.length === 0 && isSafeRuntime) {
+    selectorsWithDetails = SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail);
+  }
+
+  return {
+    contractAddress: normalizedAddress,
+    selectors: selectorsWithDetails,
+    implementationAddress: implInfo?.address || null,
+    bytecodeSource: 'rpc',
+    rpc: fetched.rpc || null
+  };
 }
 
 function normalizeBytecodeText(text) {

@@ -50,6 +50,8 @@ function escapeHtml(str) {
   const RELATED_CONTRACTS_MAX_CREATORS = 50;
   const RELATED_CONTRACTS_MAX_PER_CREATOR = 12;
   const RELATED_CONTRACTS_CHAT_LIMIT = 5;
+  const MENTIONED_CONTRACTS_CHAT_LIMIT = 3;
+  const MENTIONED_CONTRACT_ANALYSIS_TIMEOUT_MS = 12000;
   function getExtensionSettings() {
     return new Promise(resolve => {
       if (typeof chrome === 'undefined' || !chrome.storage?.sync) {
@@ -718,8 +720,8 @@ function escapeHtml(str) {
     return extractAddressFromText(element.textContent || '');
   }
 
-  function getContractCreatorInfo() {
-    const creatorContainer = document.querySelector('#ContentPlaceHolder1_trContract');
+  function getContractCreatorInfo(root = document) {
+    const creatorContainer = root.querySelector('#ContentPlaceHolder1_trContract');
     const creatorAddress = extractAddressFromElement(creatorContainer);
     if (creatorAddress) {
       return {
@@ -729,7 +731,7 @@ function escapeHtml(str) {
       };
     }
 
-    const candidates = Array.from(document.querySelectorAll('div, li, tr, section'))
+    const candidates = Array.from(root.querySelectorAll('div, li, tr, section'))
       .filter(element => /contract\s+creator/i.test(element.textContent || ''))
       .slice(0, 8);
     for (const candidate of candidates) {
@@ -1181,6 +1183,7 @@ function escapeHtml(str) {
     const linkScanRequestedSelectors = new Set();
     const summaryReadRequests = new Map();
     const chatToolReadRequests = new Map();
+    const contractMentionAnalysisRequests = new Map();
     let latestSummaryContextBase = null;
     let latestSummaryResult = null;
     let autoSummaryHydrationKey = null;
@@ -2500,6 +2503,171 @@ function escapeHtml(str) {
       };
     }
 
+    function parseSelectorDetail(selectorText) {
+      if (typeof selectorText !== 'string') return null;
+      const [selectorInfo, signatureInfo] = selectorText.split('\n');
+      if (!selectorInfo || !signatureInfo) return null;
+      const separatorIndex = selectorInfo.indexOf(': ');
+      if (separatorIndex === -1) return null;
+      const selector = selectorInfo.slice(0, separatorIndex).trim();
+      const argsAndMutability = selectorInfo.slice(separatorIndex + 2).trim();
+      const mutabilityMatch = argsAndMutability.match(/\s+(\S+)$/);
+      if (!selector || !mutabilityMatch) return null;
+      const args = argsAndMutability.slice(0, mutabilityMatch.index).trim();
+      const mutability = mutabilityMatch[1];
+      const signature = signatureInfo.trim();
+      const isRead = mutability === 'view' || mutability === 'pure';
+      return {
+        selector,
+        args,
+        mutability,
+        signature,
+        isRead,
+        isUnknown: signature === 'Unknown'
+      };
+    }
+
+    function extractMentionedAddressKeys(question) {
+      const addressMatches = [...String(question || '').matchAll(/@\(?\s*(0x[a-fA-F0-9]{40})\s*\)?/g)];
+      const keys = [];
+      const seen = new Set();
+      addressMatches.forEach(match => {
+        const key = normalizeAddressKey(match[1]);
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          keys.push(key);
+        }
+      });
+      return keys;
+    }
+
+    function compactMentionSummary(summary) {
+      if (!summary || typeof summary !== 'object') return null;
+      return {
+        summary: String(summary.summary || '').slice(0, 500),
+        contractType: String(summary.contract_type || '').slice(0, 80),
+        confidence: String(summary.confidence || '').slice(0, 20),
+        contractCreator: summary.contract_creator?.address
+          ? {
+            label: String(summary.contract_creator.label || 'Contract creator').slice(0, 80),
+            address: String(summary.contract_creator.address || '').slice(0, 60),
+            source: String(summary.contract_creator.source || 'summary-cache').slice(0, 80)
+          }
+          : null,
+        facts: compactSummaryFacts(summary)
+      };
+    }
+
+    async function fetchContractSummaryForAddress(address) {
+      const cached = await fetchContractSummaryCache(settings, {
+        chainHost: window.location.hostname,
+        contractAddress: address
+      });
+      const summary = cached?.summary_json || cached?.summary || cached;
+      return compactMentionSummary(summary);
+    }
+
+    async function fetchContractCreatorForAddress(address) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 3500);
+      try {
+        const response = await fetch(getExplorerAddressUrl(address), {
+          headers: { 'Accept': 'text/html' },
+          signal: controller.signal
+        });
+        if (!response.ok) return null;
+        const html = await response.text();
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const creator = getContractCreatorInfo(doc);
+        return creator
+          ? {
+            ...creator,
+            source: 'explorer-address-page'
+          }
+          : null;
+      } catch (e) {
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+
+    function requestMentionedContractAnalysis(address) {
+      return new Promise(resolve => {
+        const requestId = `mentioned-contract-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const timeout = window.setTimeout(() => {
+          contractMentionAnalysisRequests.delete(requestId);
+          resolve({
+            success: false,
+            contractAddress: address,
+            error: 'Mentioned contract analysis timed out'
+          });
+        }, MENTIONED_CONTRACT_ANALYSIS_TIMEOUT_MS);
+
+        contractMentionAnalysisRequests.set(requestId, payload => {
+          window.clearTimeout(timeout);
+          resolve(payload);
+        });
+
+        window.postMessage({
+          type: 'ANALYZE_CONTRACT_ADDRESS',
+          requestId,
+          contractAddress: address
+        }, '*');
+      });
+    }
+
+    async function buildMentionedContractContext(address, currentCreator) {
+      const [analysis, cachedSummary, fetchedCreator] = await Promise.all([
+        requestMentionedContractAnalysis(address),
+        fetchContractSummaryForAddress(address).catch(() => null),
+        fetchContractCreatorForAddress(address).catch(() => null)
+      ]);
+      const parsedFunctions = Array.isArray(analysis?.selectors)
+        ? analysis.selectors.map(parseSelectorDetail).filter(Boolean)
+        : [];
+      const mentionedCreator = cachedSummary?.contractCreator || fetchedCreator || null;
+      const currentCreatorAddress = currentCreator?.address || '';
+      const sameCreator = currentCreatorAddress && mentionedCreator?.address
+        ? normalizeAddressKey(currentCreatorAddress) === normalizeAddressKey(mentionedCreator.address)
+        : null;
+
+      return {
+        chainHost: window.location.hostname,
+        pageUrl: getExplorerAddressUrl(address),
+        contractAddress: address,
+        implementationAddress: analysis?.implementationAddress || null,
+        bytecodeSource: analysis?.bytecodeSource || null,
+        analysisStatus: analysis?.success ? 'ok' : 'error',
+        analysisError: analysis?.success ? null : String(analysis?.error || 'Analysis failed').slice(0, 240),
+        contractCreator: mentionedCreator,
+        creatorComparison: {
+          currentCreator: currentCreator || null,
+          mentionedCreator,
+          sameCreator,
+          note: sameCreator === false
+            ? 'Mentioned contract has a different creator/deployer than the current contract in supplied evidence.'
+            : (sameCreator === true ? 'Mentioned contract has the same creator/deployer as the current contract in supplied evidence.' : 'Creator/deployer comparison is unknown from supplied evidence.')
+        },
+        cachedSummary: cachedSummary
+          ? {
+            summary: cachedSummary.summary,
+            contractType: cachedSummary.contractType,
+            confidence: cachedSummary.confidence,
+            facts: cachedSummary.facts
+          }
+          : null,
+        counts: {
+          functions: parsedFunctions.length,
+          read: parsedFunctions.filter(record => record.isRead).length,
+          write: parsedFunctions.filter(record => !record.isRead).length,
+          unknown: parsedFunctions.filter(record => record.isUnknown).length
+        },
+        functions: parsedFunctions.slice(0, 120),
+        note: 'Mentioned contract context is fetched by address from same-chain RPC. Summary comes from cached evidence when available; deployer evidence comes from cache or the explorer address page.'
+      };
+    }
+
     function normalizeAddressKey(address) {
       return String(address || '').toLowerCase();
     }
@@ -2802,15 +2970,14 @@ function escapeHtml(str) {
       if (/@all-related\b/i.test(String(question || ''))) {
         return relatedContracts.slice(0, RELATED_CONTRACTS_CHAT_LIMIT);
       }
-      const mentionedAddresses = new Set(
-        [...String(question || '').matchAll(/@?(0x[a-fA-F0-9]{40})/g)]
-          .map(match => normalizeAddressKey(match[1]))
-      );
+      const mentionedAddresses = new Set(extractMentionedAddressKeys(question));
       return relatedContracts.filter(record => mentionedAddresses.has(normalizeAddressKey(record.contractAddress)));
     }
 
     function isCrossContractQuestion(question) {
-      return /@all-related\b/i.test(String(question || '')) || /\b(?:same\s+deployer|same\s+creator|creator|deployer|related\s+contracts?|other\s+contracts?|integrat(?:e|ed|ion)|big\s+picture|ecosystem|suite)\b/i.test(question);
+      return /@all-related\b/i.test(String(question || ''))
+        || extractMentionedAddressKeys(question).length > 0
+        || /\b(?:same\s+deployer|same\s+creator|creator|deployer|related\s+contracts?|other\s+contracts?|integrat(?:e|ed|ion)|big\s+picture|ecosystem|suite|similarit(?:y|ies)|differences?|compare)\b/i.test(question);
     }
 
     async function buildSummaryCacheParams() {
@@ -3303,6 +3470,19 @@ function escapeHtml(str) {
         if (toolContext) {
           context.toolContext = toolContext;
         }
+        const mentionedAddressKeys = extractMentionedAddressKeys(trimmed)
+          .filter(address => normalizeAddressKey(address) !== normalizeAddressKey(contractAddress))
+          .slice(0, MENTIONED_CONTRACTS_CHAT_LIMIT);
+        if (mentionedAddressKeys.length > 0) {
+          loadingItem.innerHTML = renderChatText('Fetching mentioned contract context...');
+          const mentionedContracts = await Promise.all(
+            mentionedAddressKeys.map(address => buildMentionedContractContext(address, context.contractCreator || getContractCreatorInfo()))
+          );
+          context.mentionedContracts = {
+            selected: mentionedContracts,
+            note: 'These contracts were explicitly mentioned in the chat input with @address or @(address). Compare them to the current contract even when deployer evidence says they are not from the same creator.'
+          };
+        }
         const relatedContracts = relatedContractsForCreator.length
           ? relatedContractsForCreator
           : await getRelatedContractsForCurrentCreator().catch(() => []);
@@ -3793,6 +3973,14 @@ function escapeHtml(str) {
         }
       }
 
+      if (event.data && event.data.type === 'ANALYZE_CONTRACT_ADDRESS_RESULT') {
+        const resolver = contractMentionAnalysisRequests.get(event.data.requestId);
+        if (resolver) {
+          contractMentionAnalysisRequests.delete(event.data.requestId);
+          resolver(event.data);
+        }
+      }
+
       // Handle tuple format toggle results
       if (event.data && event.data.type === 'FORMAT_TUPLE_RESULT') {
         const { selector, formatted, mode } = event.data;
@@ -3846,6 +4034,7 @@ function escapeHtml(str) {
     // Cleanup function to remove the event listener when the panel is closed
     const cleanup = () => {
       window.removeEventListener('message', messageHandler);
+      contractMentionAnalysisRequests.clear();
     };
 
     // Add cleanup to the close button
