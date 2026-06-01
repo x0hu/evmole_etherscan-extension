@@ -902,7 +902,6 @@ function buildCodexChatRequestBody({ question, context, history, fastMode = fals
         ],
         reasoning: { effort: normalizeCodexReasoningEffort(reasoningEffort) },
         text: { verbosity: 'low' },
-        max_output_tokens: 1200,
     };
 
     if (fastMode) {

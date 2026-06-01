@@ -3697,6 +3697,14 @@ function escapeHtml(str) {
           const writeFunctions = [];
           const selectorRecords = [];
 
+          const compareFunctionDisplayItems = (a, b) => {
+            const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            if (byName !== 0) return byName;
+            const byArgs = a.args.localeCompare(b.args, undefined, { sensitivity: 'base' });
+            if (byArgs !== 0) return byArgs;
+            return a.selector.localeCompare(b.selector, undefined, { sensitivity: 'base' });
+          };
+
           event.data.selectors.forEach(selector => {
             if (typeof selector !== 'string') return;
             const [selectorInfo, signatureInfo] = selector.split('\n');
@@ -3759,9 +3767,19 @@ function escapeHtml(str) {
             });
 
             if (isReadFunction) {
-              readFunctions.push(itemHtml);
+              readFunctions.push({
+                name: functionName,
+                args,
+                selector: selectorId,
+                html: itemHtml
+              });
             } else {
-              writeFunctions.push(itemHtml);
+              writeFunctions.push({
+                name: functionName,
+                args,
+                selector: selectorId,
+                html: itemHtml
+              });
             }
           });
 
@@ -3779,14 +3797,14 @@ function escapeHtml(str) {
 
           if (readFunctions.length > 0) {
             selectorsHtml += `<div class="section-header">Read Functions</div>`;
-            selectorsHtml += readFunctions.join('');
+            selectorsHtml += readFunctions.sort(compareFunctionDisplayItems).map(item => item.html).join('');
           }
           if (writeFunctions.length > 0) {
             if (readFunctions.length > 0) {
               selectorsHtml += `<div class="section-divider"></div>`;
             }
             selectorsHtml += `<div class="section-header write-section">Write Functions</div>`;
-            selectorsHtml += writeFunctions.join('');
+            selectorsHtml += writeFunctions.sort(compareFunctionDisplayItems).map(item => item.html).join('');
           }
 
           if (panel && panel.parentNode) {
