@@ -47,6 +47,12 @@ h2 {
   font-weight: 650;
 }
 
+h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+
 p {
   color: var(--muted);
   font-size: 13px;
@@ -65,6 +71,10 @@ p {
   background: var(--panel);
 }
 
+.setting-row[hidden] {
+  display: none;
+}
+
 .setting-row:first-of-type {
   margin-top: 0;
 }
@@ -79,6 +89,47 @@ p {
 
 .openrouter-row {
   grid-template-columns: minmax(0, 1fr) minmax(210px, 260px);
+}
+
+.provider-row {
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 280px);
+}
+
+.codex-row {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.codex-row h2 {
+  white-space: nowrap;
+}
+
+.codex-row .button-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.provider-control {
+  grid-template-columns: repeat(2, minmax(112px, 1fr));
+}
+
+.device-code {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #16181b;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.device-code[hidden] {
+  display: none;
 }
 
 .segmented-control {
@@ -152,6 +203,13 @@ p {
 .key-control {
   display: grid;
   gap: 8px;
+}
+
+.inline-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
 }
 
 .button-row {

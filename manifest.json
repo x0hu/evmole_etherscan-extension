@@ -27,6 +27,8 @@
   "host_permissions": [
     "https://bridge-fetchagg.vercel.app/*",
     "https://openrouter.ai/*",
+    "https://auth.openai.com/*",
+    "https://chatgpt.com/*",
     "https://*/*",
     "http://*/*"
   ],

@@ -63,7 +63,26 @@
         </label>
       </section>
 
-      <section class="setting-row openrouter-row" aria-labelledby="openrouter-label">
+      <section class="setting-row provider-row" aria-labelledby="summary-provider-label">
+        <div>
+          <h2 id="summary-provider-label">Summary provider</h2>
+          <p>Choose the model backend used for contract summaries. Codex OAuth is experimental.</p>
+        </div>
+
+        <fieldset class="segmented-control provider-control">
+          <legend class="sr-only">Summary provider</legend>
+          <label>
+            <input type="radio" name="summaryProvider" value="openrouter">
+            <span>OpenRouter</span>
+          </label>
+          <label>
+            <input type="radio" name="summaryProvider" value="codex">
+            <span>Codex OAuth</span>
+          </label>
+        </fieldset>
+      </section>
+
+      <section id="openRouterSection" class="setting-row openrouter-row" aria-labelledby="openrouter-label">
         <div>
           <h2 id="openrouter-label">OpenRouter API key</h2>
           <p>Optional local key used to summarize contract behavior with DeepSeek V4 Flash.</p>
@@ -82,6 +101,31 @@
           <div class="button-row">
             <button id="saveOpenRouterApiKey" type="button">Save</button>
             <button id="clearOpenRouterApiKey" type="button">Clear</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="codexSection" class="setting-row codex-row" aria-labelledby="codex-label">
+        <div>
+          <h2 id="codex-label">Codex OAuth</h2>
+          <p id="codexStatusText">Logged out.</p>
+          <div id="codexDeviceCode" class="device-code" hidden></div>
+        </div>
+
+        <div class="key-control">
+          <div class="inline-option">
+            <div>
+              <h3>Priority mode</h3>
+              <p>Use the Codex priority service tier for GPT-5.5 summaries.</p>
+            </div>
+            <label class="switch-control">
+              <input id="codexFastMode" type="checkbox">
+              <span aria-hidden="true"></span>
+            </label>
+          </div>
+          <div class="button-row">
+            <button id="loginCodex" type="button">Login to Codex</button>
+            <button id="logoutCodex" type="button">Logout Codex</button>
           </div>
         </div>
       </section>
