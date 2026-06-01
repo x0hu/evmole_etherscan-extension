@@ -28,7 +28,7 @@ const CODEX_DEVICE_REDIRECT_URI = 'https://auth.openai.com/deviceauth/callback';
 const CODEX_TOKEN_REFRESH_SKEW_MS = 60 * 1000;
 const TOKEN_URI_FETCH_TIMEOUT_MS = 8500;
 const TOKEN_URI_MAX_BYTES = 1024 * 1024;
-const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v14-function-surface';
+const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
 const SUMMARY_SYSTEM_PROMPT = `You are Evmole's concise EVM contract analyst. Use only the supplied evidence. Do not invent behavior from function names alone. Prioritize interpreted facts and numbers first: contribution amounts, max raise, min/max buys, taxes/fees, timestamps, cooldowns, bonding-curve parameters, routers/pairs, and privileged roles. Convert wei/token units and epoch timestamps when direct evidence supports the conversion. For token amounts, never assume decimals: only convert raw token integers when a decimals() read result is present in the evidence. Keep prose short and put explanations after facts. Never claim safety or give investment advice. Return only valid json.`;
 const openRouterSummaryInFlight = new Map();
 const SUMMARY_USER_PROMPT_PREFIX = `Analyze this EVM contract from the supplied evidence.
@@ -63,6 +63,8 @@ Rules:
 - Put concrete facts in "facts" first. Use short labels like "Per contributor", "Max contributors", "Sale window", "Buy tax", "Sell tax", "Cooldown", "Router", "Pair", "Bonding curve".
 - Prefer evidence.functionSurface over raw selector counts. Infer purpose from grouped standard/custom reads, custom writes, parameter shapes, mutability, and meaningHint fields.
 - evidence.materialReadValues is intentionally selective. Use those values for concrete addresses, limits, fees, supplies, pool configuration, or state only when present; do not require read values to infer broad purpose from function names and parameters.
+- If evidence.localSummaryBaseline exists, preserve its token identity, supply, and creator facts unless later evidence contradicts them.
+- If evidence.erc20EnrichmentFocus exists, this is an ERC-20 token that already has local baseline facts. Focus the summary, key_behaviors, and implementation_uniqueness on uncommon/custom functions and how they could affect use in a theorized scenario, using cautious language such as "suggests", "appears", or "could". Do not merely restate the standard ERC-20 surface.
 - If evidence includes contractCreator, copy its address exactly into "contract_creator.address". Do not infer a creator if it is missing.
 - If evidence includes contractIdentifiers, use those deterministic identifiers to distinguish protocol roles. For id "erc20_token", set contract_type to "erc20_token". For id "erc721_nft", set contract_type to "erc721_nft"; setApprovalForAll(address,bool) is a strong ERC-721/NFT signal. For id "uniswap_v4_hook", set contract_type to "uniswap_v4_hook" only when matched hook/base-hook selector evidence is present; hook address bits alone are only clarification.
 - For Uniswap v4 hooks, assume the reader already knows what a hook address is. Do not explain generic hook mechanics or enumerate every callback. Interpret what this specific hook appears to implement: leverage loops, LP engine behavior, debt/health/liquidation mechanics, position receipts, fee/insurance economics, pool/reserve accounting, seed liquidity, or custom constraints.
@@ -800,7 +802,11 @@ async function fetchOpenRouterSummary(apiKey, context) {
     }
 }
 
-function buildCodexSummaryRequestBody(context, { fastMode = false } = {}) {
+function normalizeCodexReasoningEffort(value) {
+    return ['low', 'medium', 'high'].includes(value) ? value : 'low';
+}
+
+function buildCodexSummaryRequestBody(context, { fastMode = false, reasoningEffort = 'low' } = {}) {
     const body = {
         model: CODEX_MODEL,
         store: false,
@@ -817,7 +823,7 @@ function buildCodexSummaryRequestBody(context, { fastMode = false } = {}) {
                 ]
             }
         ],
-        reasoning: { effort: 'medium' },
+        reasoning: { effort: normalizeCodexReasoningEffort(reasoningEffort) },
         text: { verbosity: 'low' },
     };
 
@@ -852,7 +858,7 @@ function extractCodexResponseText(response) {
     return parts.join('');
 }
 
-async function readCodexSseText(response, signal) {
+async function readCodexSseText(response, signal, { startedAt = Date.now() } = {}) {
     if (!response.body) throw new Error('Codex returned no response body.');
 
     const reader = response.body.getReader();
@@ -860,6 +866,34 @@ async function readCodexSseText(response, signal) {
     let buffer = '';
     let outputText = '';
     let finalResponseText = '';
+    const timing = {
+        firstEventMs: null,
+        firstChunkMs: null,
+        lastEventMs: null,
+        responseCreatedMs: null,
+        responseInProgressMs: null,
+        firstReasoningEventMs: null,
+        firstOutputItemMs: null,
+        firstContentPartMs: null,
+        firstOutputDeltaMs: null,
+        completedEventMs: null,
+        responseStatus: '',
+        responseModel: '',
+        responseId: '',
+        incompleteReason: '',
+        eventCounts: {},
+        eventTimeline: [],
+    };
+
+    const markEvent = type => {
+        const elapsedMs = Date.now() - startedAt;
+        if (timing.firstEventMs === null) timing.firstEventMs = elapsedMs;
+        timing.lastEventMs = elapsedMs;
+        if (type && timing.eventTimeline.length < 24) {
+            timing.eventTimeline.push({ type, elapsedMs });
+        }
+        return elapsedMs;
+    };
 
     const handleEvent = rawEvent => {
         const dataLines = rawEvent
@@ -879,15 +913,32 @@ async function readCodexSseText(response, signal) {
         }
 
         const type = String(event.type || '');
+        const eventMs = markEvent(type);
+        if (type) {
+            timing.eventCounts[type] = (timing.eventCounts[type] || 0) + 1;
+        }
+        if (type === 'response.created' && timing.responseCreatedMs === null) timing.responseCreatedMs = eventMs;
+        if (type === 'response.in_progress' && timing.responseInProgressMs === null) timing.responseInProgressMs = eventMs;
+        if (type.includes('reasoning') && timing.firstReasoningEventMs === null) timing.firstReasoningEventMs = eventMs;
+        if ((type === 'response.output_item.added' || type === 'response.output_item.done') && timing.firstOutputItemMs === null) timing.firstOutputItemMs = eventMs;
+        if ((type === 'response.content_part.added' || type === 'response.content_part.done') && timing.firstContentPartMs === null) timing.firstContentPartMs = eventMs;
+        if (event.response) {
+            timing.responseStatus = event.response.status || timing.responseStatus;
+            timing.responseModel = event.response.model || timing.responseModel;
+            timing.responseId = event.response.id || timing.responseId;
+            timing.incompleteReason = event.response.incomplete_details?.reason || timing.incompleteReason;
+        }
         if (type === 'response.failed') {
             const error = event.response?.error || event.error || {};
             throw new Error(error.message || error.code || 'Codex response failed.');
         }
         if (type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            if (timing.firstOutputDeltaMs === null) timing.firstOutputDeltaMs = Date.now() - startedAt;
             outputText += event.delta;
             return;
         }
         if ((type === 'response.completed' || type === 'response.done' || type === 'response.incomplete') && event.response) {
+            timing.completedEventMs = Date.now() - startedAt;
             finalResponseText = extractCodexResponseText(event.response) || finalResponseText;
         }
     };
@@ -896,6 +947,7 @@ async function readCodexSseText(response, signal) {
         if (signal?.aborted) throw new Error('Codex summary request was aborted.');
         const { value, done } = await reader.read();
         if (done) break;
+        if (timing.firstChunkMs === null) timing.firstChunkMs = Date.now() - startedAt;
 
         buffer += decoder.decode(value, { stream: true });
         buffer = buffer.replace(/\r\n/g, '\n');
@@ -909,14 +961,19 @@ async function readCodexSseText(response, signal) {
 
     buffer += decoder.decode();
     if (buffer.trim()) handleEvent(buffer);
-    return (outputText || finalResponseText).trim();
+    return {
+        text: (outputText || finalResponseText).trim(),
+        timing,
+    };
 }
 
-async function fetchCodexSummary(credentials, context, { fastMode = false } = {}) {
+async function fetchCodexSummary(credentials, context, { fastMode = false, reasoningEffort = 'low' } = {}) {
     const startedAt = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), CODEX_TIMEOUT_MS);
-    const body = JSON.stringify(buildCodexSummaryRequestBody(context, { fastMode }));
+    const body = JSON.stringify(buildCodexSummaryRequestBody(context, { fastMode, reasoningEffort }));
+    const requestBodyBytes = new TextEncoder().encode(body).byteLength;
+    const contextBytes = new TextEncoder().encode(JSON.stringify(context || {})).byteLength;
 
     try {
         const response = await fetch(CODEX_ENDPOINT, {
@@ -932,13 +989,20 @@ async function fetchCodexSummary(credentials, context, { fastMode = false } = {}
             signal: controller.signal,
             body,
         });
+        const responseHeadersMs = Date.now() - startedAt;
+        const responseHeaderDiagnostics = {
+            requestId: response.headers.get('x-request-id') || response.headers.get('openai-request-id') || '',
+            cfRay: response.headers.get('cf-ray') || '',
+            contentType: response.headers.get('content-type') || '',
+            serverTiming: response.headers.get('server-timing') || '',
+        };
 
         if (!response.ok) {
             const errorText = await response.text().catch(() => '');
             throw new Error(`Codex summary failed with HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 240)}` : ''}`);
         }
 
-        const contentText = await readCodexSseText(response, controller.signal);
+        const { text: contentText, timing: sseTiming } = await readCodexSseText(response, controller.signal, { startedAt });
         console.log('Codex summary raw content:', contentText);
         const jsonText = extractJsonText(contentText);
         if (!jsonText) {
@@ -951,6 +1015,19 @@ async function fetchCodexSummary(credentials, context, { fastMode = false } = {}
         } catch (error) {
             throw new Error(`Codex returned malformed JSON summary output: ${summarizeRawOutputForError(contentText) || error?.message || 'parse failed'}`);
         }
+        const totalMs = Date.now() - startedAt;
+        const timing = {
+            totalMs,
+            requestBodyBytes,
+            contextBytes,
+            responseHeadersMs,
+            responseHeaders: responseHeaderDiagnostics,
+            outputChars: contentText.length,
+            fastMode: !!fastMode,
+            reasoningEffort: normalizeCodexReasoningEffort(reasoningEffort),
+            ...sseTiming,
+        };
+        console.info('Codex summary timing:', timing);
 
         return {
             ok: true,
@@ -958,10 +1035,7 @@ async function fetchCodexSummary(credentials, context, { fastMode = false } = {}
             promptVersion: SUMMARY_PROMPT_VERSION,
             summary: normalizeSummaryPayload(parsed, context),
             usage: null,
-            timing: {
-                totalMs: Date.now() - startedAt,
-                requestBodyBytes: new TextEncoder().encode(body).byteLength,
-            },
+            timing,
         };
     } catch (error) {
         if (error?.name === 'AbortError') {
@@ -982,7 +1056,10 @@ async function handleCodexSummary(message, sendResponse) {
 
     try {
         const credentials = await getValidCodexCredentials();
-        sendResponse(await fetchCodexSummary(credentials, context, { fastMode: !!message?.fastMode }));
+        sendResponse(await fetchCodexSummary(credentials, context, {
+            fastMode: !!message?.fastMode,
+            reasoningEffort: normalizeCodexReasoningEffort(message?.reasoningEffort),
+        }));
     } catch (error) {
         sendResponse({ ok: false, error: error?.message || String(error) });
     }

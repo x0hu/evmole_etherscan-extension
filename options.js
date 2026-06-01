@@ -3,7 +3,8 @@ const DEFAULT_SETTINGS = {
   signatureDatabaseUrl: '',
   signatureDatabaseStoreUnknowns: false,
   summaryProvider: 'openrouter',
-  codexFastMode: false
+  codexFastMode: false,
+  codexReasoningEffort: 'low'
 };
 const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
 const CODEX_LOGIN_TYPE = 'EVMOLE_CODEX_LOGIN';

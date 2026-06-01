@@ -23,7 +23,8 @@ function escapeHtml(str) {
     signatureDatabaseUrl: '',
     signatureDatabaseStoreUnknowns: false,
     summaryProvider: 'openrouter',
-    codexFastMode: false
+    codexFastMode: false,
+    codexReasoningEffort: 'low'
   };
   const OPENROUTER_SUMMARY_TYPE = 'EVMOLE_OPENROUTER_SUMMARY';
   const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
@@ -31,7 +32,7 @@ function escapeHtml(str) {
   const CODEX_SUMMARY_TYPE = 'EVMOLE_CODEX_SUMMARY';
   const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
   const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
-  const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v14-function-surface';
+  const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
   const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash';
   const CODEX_SUMMARY_MODEL = 'gpt-5.5';
   const CODEX_SUMMARY_PRIORITY_MODEL = 'gpt-5.5:priority';
@@ -764,13 +765,23 @@ function escapeHtml(str) {
   function chromeMessage(message) {
     return new Promise(resolve => {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
-        resolve({ ok: false, error: 'Extension runtime is unavailable.' });
+        resolve({
+          ok: false,
+          error: 'Extension runtime is unavailable. Reload this Etherscan page to reconnect Evmole.',
+          contextInvalidated: true
+        });
         return;
       }
 
       chrome.runtime.sendMessage(message, response => {
         if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message || 'Extension message failed.' });
+          const error = chrome.runtime.lastError.message || 'Extension message failed.';
+          const contextInvalidated = /extension context invalidated|context invalidated/i.test(error);
+          resolve({
+            ok: false,
+            error: contextInvalidated ? 'Extension context invalidated. Reload this Etherscan page to reconnect Evmole.' : error,
+            contextInvalidated
+          });
           return;
         }
 
@@ -983,6 +994,27 @@ function escapeHtml(str) {
     return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   }
 
+  function formatOptionalElapsedTime(ms) {
+    return Number.isFinite(ms) ? formatElapsedTime(ms) : 'n/a';
+  }
+
+  function formatSummaryProviderTiming(provider, response, fallbackMs) {
+    const timing = response?.timing || {};
+    if (provider !== 'codex') return `${provider} ${formatElapsedTime(fallbackMs)}`;
+
+    const effort = timing.reasoningEffort || 'unknown effort';
+    const firstOutput = timing.firstOutputDeltaMs ?? timing.completedEventMs ?? null;
+    const headers = timing.responseHeadersMs ?? null;
+    const firstEvent = timing.firstEventMs ?? timing.firstChunkMs ?? null;
+    return [
+      `codex ${formatElapsedTime(fallbackMs)}`,
+      effort,
+      `headers ${formatOptionalElapsedTime(headers)}`,
+      `first event ${formatOptionalElapsedTime(firstEvent)}`,
+      `first output ${formatOptionalElapsedTime(firstOutput)}`
+    ].join(', ');
+  }
+
   function renderSummaryResult(summary) {
     const creatorAddress = extractAddressFromText(summary?.contract_creator?.address || '');
     const baseFacts = Array.isArray(summary?.facts) ? summary.facts : [];
@@ -1023,11 +1055,12 @@ function escapeHtml(str) {
     </div>`;
   }
 
-  function setSummaryState(summaryPanel, state, { message = '', summary = null } = {}) {
+  function setSummaryState(summaryPanel, state, { message = '', summary = null, contextInvalidated = false } = {}) {
     const summaryEl = summaryPanel.querySelector('.evmole-summary');
     if (!summaryEl) return;
 
     summaryEl.dataset.state = state;
+    summaryEl.dataset.contextInvalidated = contextInvalidated ? 'true' : 'false';
     const statusEl = summaryEl.querySelector('.summary-status');
     const contentEl = summaryEl.querySelector('.summary-content');
     const summarizeBtn = summaryEl.querySelector('.summary-action.summarize');
@@ -1040,6 +1073,8 @@ function escapeHtml(str) {
 
     summarizeBtn.style.display = summary || state === 'loading' ? 'none' : '';
     retryBtn.style.display = state === 'error' ? '' : 'none';
+    if (contextInvalidated) retryBtn.textContent = 'Reload page';
+    else retryBtn.textContent = 'Try again';
     reloadBtn.style.display = summary ? '' : 'none';
     summarizeBtn.disabled = state === 'loading';
     retryBtn.disabled = state === 'loading';
@@ -1502,6 +1537,10 @@ function escapeHtml(str) {
       });
       summaryEl.querySelector('.summary-action.retry')?.addEventListener('click', event => {
         event.stopPropagation();
+        if (summaryEl.dataset.contextInvalidated === 'true') {
+          window.location.reload();
+          return;
+        }
         generateContractSummary({ bypassCache: true, reloadContext: false });
       });
       summaryEl.querySelector('.summary-action.reload')?.addEventListener('click', event => {
@@ -1782,8 +1821,8 @@ function escapeHtml(str) {
       const identifiers = context.contractIdentifiers || [];
       const profiles = new Set(context.detectedProfiles || []);
       const hasErc20 = identifiers.some(identifier => identifier.id === 'erc20_token');
-      const hasComplexProfile = ['uniswap_v4_hook', 'nft', 'taxed_token', 'launch_sale', 'bonding_curve', 'vault_staking', 'governance'].some(profile => profiles.has(profile));
-      if (!hasErc20 || hasComplexProfile) return null;
+      const hasConflictingProfile = ['uniswap_v4_hook', 'nft'].some(profile => profiles.has(profile));
+      if (!hasErc20 || hasConflictingProfile) return null;
 
       const name = readResultValue(context, 'name');
       const symbol = readResultValue(context, 'symbol');
@@ -1830,6 +1869,36 @@ function escapeHtml(str) {
       };
     }
 
+    function buildErc20EnrichmentFocus(context) {
+      const identifiers = context.contractIdentifiers || [];
+      const profiles = new Set(context.detectedProfiles || []);
+      const hasErc20 = identifiers.some(identifier => identifier.id === 'erc20_token');
+      if (!hasErc20 || profiles.has('uniswap_v4_hook') || profiles.has('nft')) return null;
+
+      const implementation = context.implementationDifferences || {};
+      const customFunctions = Array.isArray(implementation.customFunctions) ? implementation.customFunctions : [];
+      const unknownSelectors = Array.isArray(implementation.unknownSelectors) ? implementation.unknownSelectors : [];
+      const customReads = customFunctions.filter(record => record?.isRead).slice(0, 8);
+      const customWrites = customFunctions.filter(record => !record?.isRead).slice(0, 10);
+      const interestingProfiles = ['taxed_token', 'launch_sale', 'bonding_curve', 'vault_staking', 'governance', 'router_pool', 'proxy']
+        .filter(profile => profiles.has(profile));
+      const hasInterestingFunctions = customReads.length > 0 || customWrites.length > 0 || unknownSelectors.length > 0 || interestingProfiles.length > 0;
+      if (!hasInterestingFunctions) return null;
+
+      return {
+        reason: 'ERC-20 baseline facts are available locally; use the model to interpret uncommon/custom surfaces only.',
+        profiles: interestingProfiles,
+        customReads,
+        customWrites,
+        unknownSelectors: unknownSelectors.slice(0, 8),
+        instruction: 'Preserve token identity/supply facts from localSummaryBaseline. Explain what the custom read/write functions suggest the token can do, in cautious language based on names, parameters, mutability, and read values.'
+      };
+    }
+
+    function shouldRequestErc20ModelEnrichment(context) {
+      return !!buildErc20EnrichmentFocus(context);
+    }
+
     function formatBasisPoints(rawValue) {
       const text = String(rawValue || '').trim();
       if (!/^-?\d+$/.test(text)) return text;
@@ -1837,122 +1906,6 @@ function escapeHtml(str) {
       if (!Number.isFinite(value)) return text;
       const percent = value / 100;
       return `${Number.isInteger(percent) ? String(percent) : percent.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}%`;
-    }
-
-    function findReadResultByNames(context, names) {
-      for (const name of names) {
-        const value = readResultValue(context, name);
-        if (value) return { name, value };
-      }
-      return null;
-    }
-
-    function summarizeFunctionNameSurface(context, patterns, limit = 8) {
-      const matches = [];
-      for (const record of context.functions || []) {
-        const name = getFunctionName(record);
-        if (!name || matches.includes(name)) continue;
-        if (patterns.some(pattern => name.includes(pattern))) matches.push(name);
-        if (matches.length >= limit) break;
-      }
-      return matches;
-    }
-
-    function buildDeterministicUniswapV4HookSummary(context) {
-      const profiles = new Set(context.detectedProfiles || []);
-      const identifiers = context.contractIdentifiers || [];
-      if (!profiles.has('uniswap_v4_hook') && !identifiers.some(identifier => identifier.id === 'uniswap_v4_hook')) return null;
-
-      const implementation = context.implementationDifferences || {};
-      const interpretedUsecase = Array.isArray(implementation.interpretedUsecase) ? implementation.interpretedUsecase : [];
-      const facts = [];
-      const poolManager = findReadResultByNames(context, ['poolManager']);
-      const poolKey = findReadResultByNames(context, ['poolKey']);
-      const origFee = findReadResultByNames(context, ['ORIG_FEE_BPS', 'origFeeBps', 'originationFeeBps']);
-      const maxLoops = findReadResultByNames(context, ['MAX_LOOPS', 'maxLoops']);
-      const loopLtv = findReadResultByNames(context, ['LOOP_LTV_BPS', 'loopLtvBps']);
-      const liqThreshold = findReadResultByNames(context, ['LIQ_THRESHOLD_BPS', 'liqThresholdBps']);
-      const liqBonus = findReadResultByNames(context, ['LIQ_BONUS_BPS', 'liqBonusBps']);
-      const insuranceSplit = findReadResultByNames(context, ['INSURANCE_SPLIT_BPS', 'insuranceSplitBps']);
-      const owner = findReadResultByNames(context, ['owner']);
-
-      if (poolManager) facts.push({ label: 'Pool manager', value: poolManager.value, source: 'poolManager()' });
-      if (poolKey) facts.push({ label: 'Pool key', value: poolKey.value, source: 'poolKey()' });
-      if (origFee) facts.push({ label: 'Origination fee', value: formatBasisPoints(origFee.value), source: `${origFee.name}()` });
-      if (loopLtv || liqThreshold || liqBonus) {
-        facts.push({
-          label: 'Risk parameters',
-          value: [
-            loopLtv ? `${formatBasisPoints(loopLtv.value)} loop LTV` : '',
-            liqThreshold ? `${formatBasisPoints(liqThreshold.value)} liquidation threshold` : '',
-            liqBonus ? `${formatBasisPoints(liqBonus.value)} liquidation bonus` : ''
-          ].filter(Boolean).join(', '),
-          source: [loopLtv?.name, liqThreshold?.name, liqBonus?.name].filter(Boolean).map(name => `${name}()`).join(', ')
-        });
-      } else if (maxLoops) {
-        facts.push({ label: 'Max loops', value: maxLoops.value, source: `${maxLoops.name}()` });
-      }
-
-      const positionFunctions = summarizeFunctionNameSurface(context, ['open', 'close', 'fold', 'position', 'debt', 'health', 'liquidat'], 10);
-      const accountingFunctions = summarizeFunctionNameSurface(context, ['pool', 'reserve', 'seed', 'obs', 'loop', 'fee', 'insurance'], 10);
-      const receiptFunctions = summarizeFunctionNameSurface(context, ['balanceof', 'allowance', 'approve', 'operator', 'transfer'], 8);
-      const hasLooping = interpretedUsecase.some(text => /loop|fold|recursive/i.test(text)) || positionFunctions.includes('fold') || !!maxLoops;
-      const hasRisk = interpretedUsecase.some(text => /debt|health|liquidat|ltv|threshold/i.test(text)) || positionFunctions.some(name => /debt|health|liquidat/.test(name));
-      const hasReceipts = interpretedUsecase.some(text => /receipt|erc-1155|erc-6909/i.test(text)) || receiptFunctions.some(name => /balanceof|operator|allowance/.test(name));
-
-      const summary = hasLooping || hasRisk
-        ? 'Uniswap v4 hook that appears to implement a leveraged LP-style position engine with loop, debt, liquidation, and pool-accounting surfaces.'
-        : 'Uniswap v4 hook with custom pool lifecycle behavior and implementation-specific read/write surfaces.';
-      const keyBehaviors = [
-        hasLooping ? 'Position functions suggest users can open, close, or fold positions through repeated liquidity/leverage steps.' : '',
-        hasRisk ? 'Debt, health-factor, LTV, threshold, or liquidation names indicate explicit risk checks around positions.' : '',
-        accountingFunctions.length ? `Pool accounting surface includes ${accountingFunctions.slice(0, 6).join(', ')}.` : ''
-      ].filter(Boolean).slice(0, 2);
-      const implementation_uniqueness = [
-        positionFunctions.length ? `Custom position surface: ${positionFunctions.slice(0, 8).join(', ')}.` : '',
-        accountingFunctions.length ? `Pool-engine/accounting surface: ${accountingFunctions.slice(0, 8).join(', ')}.` : '',
-        hasReceipts ? `Receipt/approval surface: ${receiptFunctions.slice(0, 6).join(', ')}.` : ''
-      ].filter(Boolean).slice(0, 3);
-      const limits = [
-        maxLoops ? `Max loops: ${maxLoops.value}.` : '',
-        origFee ? `Origination fee: ${formatBasisPoints(origFee.value)}.` : '',
-        insuranceSplit ? `Insurance split: ${formatBasisPoints(insuranceSplit.value)}.` : ''
-      ].filter(Boolean);
-      const controls = [
-        owner ? `Owner address is ${owner.value}.` : '',
-        receiptFunctions.includes('setoperator') || summarizeFunctionNameSurface(context, ['setoperator'], 1).length ? 'Operator approvals are supported.' : ''
-      ].filter(Boolean);
-
-      return {
-        summary,
-        contract_creator: context.contractCreator?.address ? {
-          address: context.contractCreator.address,
-          label: context.contractCreator.label || 'Contract creator',
-          source: context.contractCreator.source || 'explorer'
-        } : null,
-        facts: facts.slice(0, 4),
-        contract_type: 'uniswap_v4_hook',
-        confidence: 'high',
-        key_behaviors: keyBehaviors,
-        implementation_uniqueness,
-        read_context: [
-          poolKey ? {
-            name: 'poolKey()',
-            value: poolKey.value,
-            meaning: 'Configured Uniswap v4 pool this hook is tied to.',
-            confidence: 'high'
-          } : null,
-          poolManager ? {
-            name: 'poolManager()',
-            value: poolManager.value,
-            meaning: 'PoolManager address used by the hook.',
-            confidence: 'high'
-          } : null
-        ].filter(Boolean).slice(0, 2),
-        limits_taxes_and_rules: limits,
-        privileged_controls: controls,
-        unknowns: []
-      };
     }
 
     function detectContractProfiles(functions) {
@@ -2095,7 +2048,8 @@ function escapeHtml(str) {
 
     function getSummaryProviderModel(provider = getSummaryProvider()) {
       if (provider !== 'codex') return SUMMARY_MODEL;
-      return settings.codexFastMode ? CODEX_SUMMARY_PRIORITY_MODEL : CODEX_SUMMARY_MODEL;
+      const baseModel = settings.codexFastMode ? CODEX_SUMMARY_PRIORITY_MODEL : CODEX_SUMMARY_MODEL;
+      return `${baseModel}:low`;
     }
 
     function getReadResultStatus(entry) {
@@ -2392,9 +2346,10 @@ function escapeHtml(str) {
       };
     }
 
-    function compactSummaryContextForModel(context) {
+    function compactSummaryContextForModel(context, { localSummaryBaseline = null } = {}) {
       const profiles = new Set(context.detectedProfiles || []);
       const isHook = profiles.has('uniswap_v4_hook');
+      const erc20EnrichmentFocus = buildErc20EnrichmentFocus(context);
       const compacted = {
         chainHost: context.chainHost,
         pageUrl: context.pageUrl,
@@ -2406,6 +2361,8 @@ function escapeHtml(str) {
         contractIdentifiers: context.contractIdentifiers || [],
         functionSurface: buildFunctionSurface(context),
         implementationDifferences: compactImplementationDifferencesForModel(context.implementationDifferences, { isHook }),
+        localSummaryBaseline,
+        erc20EnrichmentFocus,
         proxyContext: context.proxyContext || null,
         providerContextVersion: context.providerContextVersion || '',
         materialReadValues: buildMaterialReadValues(context, isHook ? 12 : 8),
@@ -2944,6 +2901,7 @@ function escapeHtml(str) {
         modelMs: 0,
         storeCacheMs: 0
       };
+      let visibleFallbackSummary = null;
       try {
         const selectedProvider = getSummaryProvider();
         setSummaryState(summaryPanel, 'loading', { message: automatic ? 'Auto summarizing...' : (reloadContext ? 'Reloading context...' : 'Building context...') });
@@ -2983,7 +2941,8 @@ function escapeHtml(str) {
         };
 
         const deterministicSummary = buildDeterministicErc20Summary(context);
-        if (deterministicSummary) {
+        const shouldEnrichErc20 = deterministicSummary && shouldRequestErc20ModelEnrichment(context);
+        if (deterministicSummary && !shouldEnrichErc20) {
           latestSummaryResult = { source: 'generated', summary: deterministicSummary };
           setSummaryState(summaryPanel, 'generated', {
             message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (local)`,
@@ -3004,30 +2963,36 @@ function escapeHtml(str) {
           return;
         }
 
-        const deterministicHookSummary = buildDeterministicUniswapV4HookSummary(context);
-        if (deterministicHookSummary) {
-          latestSummaryResult = { source: 'generated', summary: deterministicHookSummary };
-          setSummaryState(summaryPanel, 'generated', {
-            message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (local)`,
-            summary: deterministicHookSummary
+        if (deterministicSummary && shouldEnrichErc20) {
+          visibleFallbackSummary = deterministicSummary;
+          latestSummaryResult = { source: 'generated', summary: deterministicSummary };
+          setSummaryState(summaryPanel, 'loading', {
+            message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (local). Asking ${selectedProvider === 'codex' ? 'Codex' : 'OpenRouter'} for custom function context...`,
+            summary: deterministicSummary
           });
-          rememberCurrentRelatedContract(deterministicHookSummary);
-
-          const storeStartedAt = performance.now();
-          await storeContractSummaryCache(settings, {
-            ...cacheParams,
-            chainHost: context.chainHost,
-            contractAddress: context.contractAddress,
-            implementationAddress: context.implementationAddress || null,
-            creatorAddress: context.contractCreator?.address || null,
-            summary: deterministicHookSummary
-          });
-          timing.storeCacheMs = performance.now() - storeStartedAt;
-          return;
+          rememberCurrentRelatedContract(deterministicSummary);
         }
 
-        const modelContext = compactSummaryContextForModel(context);
-        setSummaryState(summaryPanel, 'loading', { message: selectedProvider === 'codex' ? 'Asking Codex...' : 'Asking OpenRouter...' });
+        const modelContext = compactSummaryContextForModel(context, {
+          localSummaryBaseline: visibleFallbackSummary
+        });
+        const modelContextBytes = encodeByteLength(modelContext);
+        const modelContextDiagnostics = {
+          bytes: modelContextBytes,
+          profiles: modelContext.detectedProfiles || [],
+          standardSurface: modelContext.functionSurface?.standardSurface?.length || 0,
+          customReads: modelContext.functionSurface?.customReads?.length || 0,
+          customWrites: modelContext.functionSurface?.customWrites?.length || 0,
+          controls: modelContext.functionSurface?.controls?.length || 0,
+          tokenLikeSurface: modelContext.functionSurface?.tokenLikeSurface?.length || 0,
+          hookSurface: modelContext.functionSurface?.hookSurface?.length || 0,
+          materialReadValues: modelContext.materialReadValues?.length || 0,
+          sourceLinks: modelContext.sourceLinks?.length || 0,
+          contractInfoChars: String(modelContext.contractInfo || '').length
+        };
+        if (!visibleFallbackSummary) {
+          setSummaryState(summaryPanel, 'loading', { message: selectedProvider === 'codex' ? 'Asking Codex...' : 'Asking OpenRouter...' });
+        }
         const modelStartedAt = performance.now();
         let response;
         let providerUsed = selectedProvider;
@@ -3036,6 +3001,7 @@ function escapeHtml(str) {
             type: CODEX_SUMMARY_TYPE,
             context: modelContext,
             fastMode: !!settings.codexFastMode,
+            reasoningEffort: 'low',
             dedupeKey: stableStringify(cacheParams)
           });
           if (!response?.ok && await hasOpenRouterApiKey()) {
@@ -3046,7 +3012,10 @@ function escapeHtml(str) {
               ...cacheParams,
               model: SUMMARY_MODEL
             };
-            setSummaryState(summaryPanel, 'loading', { message: `Codex failed: ${codexError.slice(0, 90)}. Asking OpenRouter...` });
+            setSummaryState(summaryPanel, 'loading', {
+              message: `Codex failed: ${codexError.slice(0, 90)}. Asking OpenRouter...`,
+              summary: visibleFallbackSummary
+            });
             response = await chromeMessage({
               type: OPENROUTER_SUMMARY_TYPE,
               context: modelContext,
@@ -3063,12 +3032,15 @@ function escapeHtml(str) {
         timing.modelMs = performance.now() - modelStartedAt;
 
         if (!response?.ok) {
-          throw new Error(response?.error || `${providerUsed === 'codex' ? 'Codex' : 'OpenRouter'} summary failed.`);
+          const error = new Error(response?.error || `${providerUsed === 'codex' ? 'Codex' : 'OpenRouter'} summary failed.`);
+          if (response?.contextInvalidated) error.contextInvalidated = true;
+          throw error;
         }
 
         latestSummaryResult = { source: 'generated', summary: response.summary };
+        const providerTimingLabel = formatSummaryProviderTiming(providerUsed, response, timing.modelMs);
         setSummaryState(summaryPanel, 'generated', {
-          message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (${providerUsed} ${formatElapsedTime(timing.modelMs)})`,
+          message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (${providerTimingLabel})`,
           summary: response.summary
         });
         rememberCurrentRelatedContract(response.summary);
@@ -3101,10 +3073,22 @@ function escapeHtml(str) {
           contextDiagnostics: context.contextDiagnostics || null,
           functions: context.counts,
           providerTiming: response.timing || null,
+          modelContext: modelContextDiagnostics,
           usage: response.usage || null
         });
       } catch (error) {
-        setSummaryState(summaryPanel, 'error', { message: error?.message || String(error) });
+        if (visibleFallbackSummary) {
+          latestSummaryResult = { source: 'generated', summary: visibleFallbackSummary };
+          setSummaryState(summaryPanel, 'generated', {
+            message: `Generated summary ${formatElapsedTime(performance.now() - startedAt)} (local; model enrichment failed)`,
+            summary: visibleFallbackSummary
+          });
+          return;
+        }
+        setSummaryState(summaryPanel, 'error', {
+          message: error?.message || String(error),
+          contextInvalidated: !!error?.contextInvalidated || /extension context invalidated|runtime is unavailable/i.test(String(error?.message || error))
+        });
       }
     }
 
