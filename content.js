@@ -33,7 +33,7 @@ function escapeHtml(str) {
   const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
   const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
   const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
-  const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
+  const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v19-token-limit-facts';
   const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash';
   const CODEX_SUMMARY_MODEL = 'gpt-5.5';
   const CODEX_SUMMARY_PRIORITY_MODEL = 'gpt-5.5:priority';
@@ -1557,6 +1557,18 @@ function escapeHtml(str) {
       return String(record?.signature || '').split('(')[0].toLowerCase();
     }
 
+    function normalizeFunctionNameForMatch(value) {
+      return String(value || '').split('(')[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    function functionNameHas(name, pattern) {
+      const rawName = String(name || '').toLowerCase();
+      const rawPattern = String(pattern || '').toLowerCase();
+      const normalizedName = normalizeFunctionNameForMatch(rawName);
+      const normalizedPattern = normalizeFunctionNameForMatch(rawPattern);
+      return rawName.includes(rawPattern) || (!!normalizedPattern && normalizedName.includes(normalizedPattern));
+    }
+
     function normalizeSelectorId(selector) {
       const text = String(selector || '').trim().toLowerCase();
       if (!text) return '';
@@ -1791,7 +1803,12 @@ function escapeHtml(str) {
 
     function readResultByName(context, name) {
       const target = String(name || '').toLowerCase();
-      return (context.readResults || []).find(entry => String(entry?.name || '').split('(')[0].toLowerCase() === target && entry.success);
+      const normalizedTarget = normalizeFunctionNameForMatch(target);
+      return (context.readResults || []).find(entry => {
+        if (!entry?.success) return false;
+        const entryName = String(entry?.name || '').split('(')[0].toLowerCase();
+        return entryName === target || (!!normalizedTarget && normalizeFunctionNameForMatch(entryName) === normalizedTarget);
+      });
     }
 
     function readResultValue(context, name) {
@@ -1821,6 +1838,31 @@ function escapeHtml(str) {
       }
     }
 
+    function percentOfRawTotal(rawValue, totalValue) {
+      const raw = String(rawValue || '').trim();
+      const total = String(totalValue || '').trim();
+      if (!/^\d+$/.test(raw) || !/^\d+$/.test(total)) return '';
+      try {
+        const rawInt = BigInt(raw);
+        const totalInt = BigInt(total);
+        if (totalInt <= 0n) return '';
+        const basisPoints = (rawInt * 10000n) / totalInt;
+        const whole = basisPoints / 100n;
+        const fraction = (basisPoints % 100n).toString().padStart(2, '0').replace(/0+$/, '');
+        return `${whole.toString()}${fraction ? `.${fraction}` : ''}%`;
+      } catch {
+        return '';
+      }
+    }
+
+    function findTokenLimitRead(context, patterns) {
+      return (context.readResults || []).find(entry => {
+        if (!entry?.success) return false;
+        const name = String(entry.name || '').split('(')[0];
+        return patterns.some(pattern => functionNameHas(name, pattern));
+      });
+    }
+
     function buildDeterministicErc20Summary(context) {
       const identifiers = context.contractIdentifiers || [];
       const profiles = new Set(context.detectedProfiles || []);
@@ -1833,8 +1875,12 @@ function escapeHtml(str) {
       const decimals = readResultValue(context, 'decimals');
       const totalSupplyRaw = readResultValue(context, 'totalSupply');
       const maxSupplyRaw = readResultValue(context, 'maxSupply') || readResultValue(context, 'MAX_SUPPLY');
+      const maxWalletEntry = findTokenLimitRead(context, ['maxwallet', 'walletlimit', 'maxhold', 'maxholding']);
+      const maxWalletRaw = maxWalletEntry ? String(maxWalletEntry.value ?? '').trim() : '';
       const totalSupply = totalSupplyRaw ? formatTokenAmount(totalSupplyRaw, decimals, symbol) : '';
       const maxSupply = maxSupplyRaw ? formatTokenAmount(maxSupplyRaw, decimals, symbol) : '';
+      const maxWallet = maxWalletRaw ? formatTokenAmount(maxWalletRaw, decimals, symbol) : '';
+      const maxWalletPercent = maxWalletRaw && totalSupplyRaw ? percentOfRawTotal(maxWalletRaw, totalSupplyRaw) : '';
       const facts = [];
 
       if (name || symbol) {
@@ -1853,9 +1899,16 @@ function escapeHtml(str) {
         if (totalSupply) facts.push({ label: 'Total supply', value: totalSupply, source: 'totalSupply() + decimals()' });
         if (maxSupply) facts.push({ label: 'Max supply', value: maxSupply, source: 'maxSupply() + decimals()' });
       }
+      if (maxWallet) {
+        facts.push({
+          label: 'Max wallet',
+          value: maxWalletPercent ? `${maxWallet} (${maxWalletPercent} of supply)` : maxWallet,
+          source: [maxWalletEntry?.name || 'maxWallet()', totalSupplyRaw ? 'totalSupply()' : '', decimals ? 'decimals()' : ''].filter(Boolean).join(' + ')
+        });
+      }
 
       return {
-        summary: `${name || symbol || 'This contract'} exposes a standard ERC-20 token surface${totalSupply ? ` with ${totalSupply} supply` : ''}.`,
+        summary: `${name || symbol || 'This contract'} exposes a standard ERC-20 token surface${totalSupply ? ` with ${totalSupply} supply` : ''}${maxWallet ? ` and a ${maxWalletPercent ? `${maxWalletPercent} ` : ''}max-wallet read` : ''}.`,
         contract_creator: context.contractCreator?.address ? {
           address: context.contractCreator.address,
           label: context.contractCreator.label || 'Contract creator',
@@ -1866,8 +1919,13 @@ function escapeHtml(str) {
         confidence: 'high',
         key_behaviors: ['Standard ERC-20 metadata, supply, balance, transfer, approval, and allowance functions are present.'],
         implementation_uniqueness: [],
-        read_context: [],
-        limits_taxes_and_rules: [],
+        read_context: maxWallet ? [{
+          name: maxWalletEntry?.name || 'maxWallet()',
+          value: maxWalletPercent ? `${maxWallet} (${maxWalletPercent} of supply)` : maxWallet,
+          meaning: 'Maximum token balance a wallet may be allowed to hold.',
+          confidence: 'medium'
+        }] : [],
+        limits_taxes_and_rules: maxWallet ? [`${maxWalletEntry?.name || 'maxWallet()'} reports ${maxWalletPercent ? `${maxWallet} (${maxWalletPercent} of supply)` : maxWallet}.`] : [],
         privileged_controls: [],
         unknowns: []
       };
@@ -1914,7 +1972,7 @@ function escapeHtml(str) {
 
     function detectContractProfiles(functions) {
       const names = new Set((functions || []).map(getFunctionName).filter(Boolean));
-      const has = (...candidates) => candidates.some(name => names.has(name) || [...names].some(existing => existing.includes(name)));
+      const has = (...candidates) => candidates.some(name => names.has(name) || [...names].some(existing => functionNameHas(existing, name)));
       const profiles = [];
       const identifiers = detectContractIdentifiers(functions);
 
@@ -1922,7 +1980,7 @@ function escapeHtml(str) {
       if (identifiers.some(identifier => identifier.id === 'erc20_token')) profiles.push('token');
       if (identifiers.some(identifier => identifier.id === 'uniswap_v4_hook')) profiles.push('uniswap_v4_hook');
       if (has('decimals', 'totalsupply', 'maxsupply', 'totalminted', 'balanceof', 'symbol', 'name', 'transfer')) profiles.push('token');
-      if (has('buytax', 'selltax', 'tax', 'fee', 'maxwallet', 'maxtx', 'tradingenabled', 'swapback', 'excludefromfees')) profiles.push('taxed_token');
+      if (has('buytax', 'selltax', 'tax', 'fee', 'tradingenabled', 'swapback', 'excludefromfees')) profiles.push('taxed_token');
       if (has('contribute', 'contributionamount', 'maxraise', 'saleend', 'salestart', 'claimallocation', 'refund', 'finalize')) profiles.push('launch_sale');
       if (has('bonding', 'curve', 'quote', 'reserve', 'graduat', 'sqrtprice', 'virtual')) profiles.push('bonding_curve');
       if (has('tokenuri', 'nfttokenuri', 'baseuri', 'tokensofowner', 'royaltyinfo', 'mintprice', 'maxsupply')) profiles.push('nft');
@@ -1954,7 +2012,7 @@ function escapeHtml(str) {
       let score = 0;
 
       const addIf = (weight, ...patterns) => {
-        if (patterns.some(pattern => name.includes(pattern))) score += weight;
+        if (patterns.some(pattern => functionNameHas(name, pattern))) score += weight;
       };
 
       if (name === 'decimals') score += 240;
@@ -1963,7 +2021,8 @@ function escapeHtml(str) {
       addIf(125, 'poolmanager', 'gethookpermissions', 'beforeswap', 'afterswap', 'beforeaddliquidity', 'afteraddliquidity', 'beforeremoveliquidity', 'afterremoveliquidity');
       addIf(123, 'origfeebps', 'orig_fee_bps', 'maxloops', 'max_loops', 'loopltvbps', 'loop_ltv_bps', 'liqthresholdbps', 'liq_threshold_bps', 'liqbonusbps', 'liq_bonus_bps', 'insurancesplitbps', 'insurance_split_bps', 'poolkey', 'pool_key', 'reserve');
       addIf(120, 'contributionamount', 'maxraise', 'maxcontributor', 'salestart', 'saleend', 'finalizeallowedat', 'readytofinalize');
-      addIf(115, 'buytax', 'selltax', 'tax', 'fee', 'maxwallet', 'maxtx', 'maxtransaction', 'tradingenabled', 'cooldown');
+      addIf(115, 'buytax', 'selltax', 'tax', 'fee', 'tradingenabled', 'cooldown');
+      addIf(70, 'maxwallet', 'walletlimit', 'maxbuytx', 'maxtx', 'maxtransaction');
       addIf(110, 'owner', 'admin', 'operator', 'manager', 'treasury', 'wallet');
       addIf(100, 'router', 'factory', 'pair', 'pool', 'weth', 'token');
       addIf(95, 'paused', 'enabled', 'finalized', 'aborted', 'launched');
@@ -1977,7 +2036,7 @@ function escapeHtml(str) {
       if (profileSet.has('launch_sale')) addIf(80, 'contribution', 'raise', 'sale', 'claim', 'refund', 'finalize', 'abort', 'operator');
       if (profileSet.has('uniswap_v4_hook')) addIf(90, 'hook', 'poolmanager', 'swap', 'liquidity', 'donate', 'tax', 'signer', 'nonce', 'sniper', 'migration', 'loop', 'ltv', 'debt', 'health', 'liquidat', 'position', 'reserve', 'seed', 'fold', 'close', 'open');
       if (profileSet.has('token')) addIf(80, 'decimals', 'supply', 'minted', 'symbol', 'name');
-      if (profileSet.has('taxed_token')) addIf(80, 'tax', 'fee', 'wallet', 'transaction', 'trading', 'swap', 'pair', 'router');
+      if (profileSet.has('taxed_token')) addIf(80, 'tax', 'fee', 'trading', 'swap', 'pair', 'router');
       if (profileSet.has('bonding_curve')) addIf(80, 'bonding', 'curve', 'reserve', 'quote', 'price', 'supply', 'sqrt', 'graduat');
       if (profileSet.has('nft')) addIf(70, 'tokenuri', 'baseuri', 'supply', 'mint', 'royalty', 'renderer');
       if (profileSet.has('vault_staking')) addIf(70, 'asset', 'deposit', 'withdraw', 'stake', 'reward', 'claim', 'lock');
@@ -2013,8 +2072,16 @@ function escapeHtml(str) {
         .map(entry => entry.record);
       if (plainErc20) {
         const tokenReadNames = ['name', 'symbol', 'decimals', 'totalsupply', 'maxsupply', 'max_supply', 'owner'];
+        const tokenLimitReadPatterns = ['maxwallet', 'walletlimit', 'maxbuytx', 'maxtx', 'maxtransaction'];
         const tokenReads = functions
-          .filter(record => record?.isRead && record.args === '()' && tokenReadNames.includes(getFunctionName(record)))
+          .filter(record => {
+            if (!record?.isRead || record.args !== '()') return false;
+            const name = getFunctionName(record);
+            return tokenReadNames.includes(name) || tokenLimitReadPatterns.some(pattern => functionNameHas(name, pattern));
+          })
+          .map((record, index) => ({ record, index, score: readPriorityScore(record, profiles) }))
+          .sort((a, b) => b.score - a.score || a.index - b.index)
+          .map(entry => entry.record)
           .slice(0, readQueryLimit);
         if (tokenReads.length >= 3) {
           return {
@@ -2187,7 +2254,7 @@ function escapeHtml(str) {
       const isWrite = !record?.isRead;
       const hints = [];
       const add = (hint, ...patterns) => {
-        if (patterns.some(pattern => name.includes(pattern))) hints.push(hint);
+        if (patterns.some(pattern => functionNameHas(name, pattern))) hints.push(hint);
       };
 
       add('token metadata or supply', 'name', 'symbol', 'decimals', 'totalsupply', 'maxsupply');
@@ -2293,7 +2360,7 @@ function escapeHtml(str) {
       const profileSet = new Set(profiles || []);
       let score = 0;
       const addIf = (weight, ...patterns) => {
-        if (patterns.some(pattern => name.includes(pattern))) score += weight;
+        if (patterns.some(pattern => functionNameHas(name, pattern))) score += weight;
       };
 
       addIf(120, 'poolmanager', 'poolkey', 'owner', 'admin', 'treasury', 'router', 'factory', 'pair', 'weth');

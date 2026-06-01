@@ -29,7 +29,7 @@ const CODEX_DEVICE_REDIRECT_URI = 'https://auth.openai.com/deviceauth/callback';
 const CODEX_TOKEN_REFRESH_SKEW_MS = 60 * 1000;
 const TOKEN_URI_FETCH_TIMEOUT_MS = 8500;
 const TOKEN_URI_MAX_BYTES = 1024 * 1024;
-const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v18-latency-diagnostics';
+const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v19-token-limit-facts';
 const SUMMARY_SYSTEM_PROMPT = `You are Evmole's concise EVM contract analyst. Use only the supplied evidence. Do not invent behavior from function names alone. Prioritize interpreted facts and numbers first: contribution amounts, max raise, min/max buys, taxes/fees, timestamps, cooldowns, bonding-curve parameters, routers/pairs, and privileged roles. Convert wei/token units and epoch timestamps when direct evidence supports the conversion. For token amounts, never assume decimals: only convert raw token integers when a decimals() read result is present in the evidence. Keep prose short and put explanations after facts. Never claim safety or give investment advice. Return only valid json.`;
 const CHAT_SYSTEM_PROMPT = 'You are Evmole contract chat. Answer questions about the current EVM contract using only the supplied evidence, toolContext, relatedContracts, mentionedContracts, and prior chat. Be concise. If mentionedContracts are provided, compare the explicitly mentioned contracts to the current contract even when creator/deployer evidence differs or is missing. If relatedContracts are provided, compare only the supplied contracts and explain how they may fit together from creator, summaries, facts, function counts, and explicit evidence; do not infer integration beyond evidence. If toolContext contains NFT metadata, image, SVG, or JSON, summarize the fetched facts directly without naming internal read functions unless the user asks. If evidence is missing, ask for the missing value plainly. Do not claim safety or give investment advice.';
 const openRouterSummaryInFlight = new Map();
@@ -509,22 +509,62 @@ function normalizeSummaryPayload(payload, context = null) {
             source: cleanText(inputCreator.source || contextCreator.source || 'explorer') || 'explorer',
         }
         : null;
-    const normalizedFacts = Array.isArray(summary.facts) ? summary.facts.slice(0, 4).map(entry => ({
+    const normalizeFactEntry = entry => ({
         label: cleanText(entry?.label || ''),
         value: cleanText(entry?.value ?? ''),
         source: cleanText(entry?.source || ''),
-    })).filter(entry => {
+    });
+    const keepFact = entry => {
         const label = entry.label.toLowerCase();
         const source = entry.source.toLowerCase();
         if (label === 'hook flags' || label === 'hook permissions') return false;
         if (source.includes('contractidentifiers.hookflags') || source.includes('gethookpermissions()')) return false;
         return entry.label || entry.value;
-    }) : [];
+    };
+    const normalizedFacts = Array.isArray(summary.facts) ? summary.facts.map(normalizeFactEntry).filter(keepFact) : [];
+    const baselineFacts = Array.isArray(context?.localSummaryBaseline?.facts)
+        ? context.localSummaryBaseline.facts.map(normalizeFactEntry).filter(keepFact)
+        : [];
+    const factKey = entry => `${entry.label.toLowerCase().replace(/[^a-z0-9]/g, '')}:${entry.source.toLowerCase().replace(/\s/g, '')}`;
+    const isTokenBaselineFact = entry => /^(name|decimals|supply|totalsupply|maxsupply|maxwallet)$/i.test(entry.label.replace(/\s+/g, ''));
+    const mergedFacts = [];
+    for (const entry of normalizedFacts) {
+        if (!mergedFacts.some(existing => factKey(existing) === factKey(entry))) mergedFacts.push(entry);
+    }
+    for (const entry of baselineFacts.filter(isTokenBaselineFact)) {
+        const labelKey = entry.label.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const sourceKey = entry.source.toLowerCase().replace(/\s/g, '');
+        const hasSameFact = mergedFacts.some(existing => {
+            const existingLabel = existing.label.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const existingSource = existing.source.toLowerCase().replace(/\s/g, '');
+            const existingSourceText = existing.source.toLowerCase();
+            const sourceText = entry.source.toLowerCase();
+            const sameMaxWalletSource = (sourceText.includes('max_wallet()') && existingSourceText.includes('max_wallet()'))
+                || (sourceText.includes('maxwallet()') && existingSourceText.includes('maxwallet()'));
+            return existingLabel === labelKey || (sourceKey && existingSource === sourceKey) || sameMaxWalletSource;
+        });
+        if (!hasSameFact) mergedFacts.push(entry);
+    }
+    const factPriority = entry => {
+        const label = entry.label.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const source = entry.source.toLowerCase();
+        if (label === 'name' || source.includes('name()') || source.includes('symbol()')) return 100;
+        if (label === 'decimals' || source.includes('decimals()')) return 90;
+        if (label === 'supply' || label === 'totalsupply' || source.includes('totalsupply()')) return 85;
+        if (label === 'maxsupply' || source.includes('maxsupply()')) return 80;
+        if (label === 'maxwallet' || source.includes('max_wallet()') || source.includes('maxwallet()')) return 75;
+        return 50;
+    };
+    const prioritizedFacts = mergedFacts
+        .map((entry, index) => ({ entry, index, priority: factPriority(entry) }))
+        .sort((a, b) => b.priority - a.priority || a.index - b.index)
+        .slice(0, 4)
+        .map(item => item.entry);
 
     return {
         summary: cleanText(summary.summary || ''),
         contract_creator: contractCreator,
-        facts: normalizedFacts,
+        facts: prioritizedFacts,
         contract_type: cleanText(summary.contract_type || 'unknown') || 'unknown',
         confidence: ['high', 'medium', 'low'].includes(summary.confidence) ? summary.confidence : 'low',
         key_behaviors: Array.isArray(summary.key_behaviors) ? summary.key_behaviors.map(cleanText).slice(0, 2) : [],
