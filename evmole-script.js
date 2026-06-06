@@ -11,6 +11,7 @@ const PROXY_SLOTS = {
 // EIP-1167 minimal proxy pattern
 const MINIMAL_PROXY_REGEX = /^0x363d3d373d3d3d363d73([a-fA-F0-9]{40})5af43d82803e903d91602b57fd5bf3$/;
 const PROXY_SELECTOR_THRESHOLD = 8;
+const MAX_PROXY_RESOLUTION_DEPTH = 4;
 const SAFE_PROXY_RUNTIME_EXACT = '0x608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea264697066735822122003d1488ee65e08fa41e58e888a9865554c535f2c77126a82cb4c0f917f31441364736f6c63430007060033';
 const SAFE_FALLBACK_FUNCTIONS = [
   { selector: '0xa0e67e2b', args: '()', mutability: 'view', signature: 'getOwners()' },
@@ -514,19 +515,44 @@ async function detectProxyImplementation(address, bytecode) {
   return null;
 }
 
-async function getImplementationBytecode(address, proxyBytecode) {
-  const implAddress = await detectProxyImplementation(address, proxyBytecode);
-  if (!implAddress) return null;
+async function getImplementationBytecode(address, proxyBytecode, { maxDepth = MAX_PROXY_RESOLUTION_DEPTH } = {}) {
+  let currentAddress = address;
+  let currentBytecode = proxyBytecode;
+  let resolved = null;
+  const path = [];
+  const seen = new Set([String(address).toLowerCase()]);
 
-  try {
-    const { code: implBytecode } = await hedgedGetCode(implAddress);
-    if (implBytecode && implBytecode !== '0x') {
-      return { address: implAddress, bytecode: implBytecode };
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    const implAddress = await detectProxyImplementation(currentAddress, currentBytecode);
+    if (!implAddress) break;
+
+    const normalizedImplAddress = implAddress.toLowerCase();
+    if (seen.has(normalizedImplAddress)) {
+      console.log('Proxy implementation cycle detected, stopping at:', implAddress);
+      break;
     }
-  } catch (e) {
-    console.log('Failed to fetch implementation bytecode:', e.message);
+
+    seen.add(normalizedImplAddress);
+    path.push(implAddress);
+
+    try {
+      const { code: implBytecode } = await hedgedGetCode(implAddress);
+      if (!implBytecode || implBytecode === '0x') break;
+
+      resolved = { address: implAddress, bytecode: implBytecode, path: [...path] };
+      currentAddress = implAddress;
+      currentBytecode = implBytecode;
+    } catch (e) {
+      console.log('Failed to fetch implementation bytecode:', e.message);
+      break;
+    }
   }
-  return null;
+
+  if (resolved?.path?.length > 1) {
+    console.log('Resolved proxy implementation chain:', [address, ...resolved.path].join(' -> '));
+  }
+
+  return resolved || null;
 }
 
 async function decodeSingleWordResult(hexData, fnName) {
@@ -1111,6 +1137,7 @@ async function analyzeContractAddress(targetAddress) {
       contractAddress: normalizedAddress,
       selectors: SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail),
       implementationAddress: null,
+      implementationPath: [],
       bytecodeSource: 'rpc',
       rpc: fetched.rpc || null
     };
@@ -1153,6 +1180,7 @@ async function analyzeContractAddress(targetAddress) {
     contractAddress: normalizedAddress,
     selectors: selectorsWithDetails,
     implementationAddress: implInfo?.address || null,
+    implementationPath: implInfo?.path || [],
     bytecodeSource: 'rpc',
     rpc: fetched.rpc || null
   };
@@ -1285,6 +1313,7 @@ async function extractFunctions() {
         type: 'FUNCTION_SELECTORS_RESULT',
         selectors: finalSelectors,
         implementationAddress: null,
+        implementationPath: [],
         bytecodeSource
       }, '*');
       return;
@@ -1340,6 +1369,7 @@ async function extractFunctions() {
       type: 'FUNCTION_SELECTORS_RESULT',
       selectors: finalSelectors,
       implementationAddress: implInfo?.address || null,
+      implementationPath: implInfo?.path || [],
       bytecodeSource
     }, '*');
   } catch (e) {

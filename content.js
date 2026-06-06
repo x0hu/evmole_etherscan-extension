@@ -2705,6 +2705,7 @@ function escapeHtml(str) {
         pageUrl: getExplorerAddressUrl(address),
         contractAddress: address,
         implementationAddress: analysis?.implementationAddress || null,
+        implementationPath: Array.isArray(analysis?.implementationPath) ? analysis.implementationPath : [],
         bytecodeSource: analysis?.bytecodeSource || null,
         analysisStatus: analysis?.success ? 'ok' : 'error',
         analysisError: analysis?.success ? null : String(analysis?.error || 'Analysis failed').slice(0, 240),
@@ -3787,12 +3788,23 @@ function escapeHtml(str) {
 
           // Show implementation address if proxy detected
           if (event.data.implementationAddress) {
-            const implAddr = event.data.implementationAddress;
-            const shortAddr = implAddr.slice(0, 6) + '...' + implAddr.slice(-4);
-            selectorsHtml += `<div class="impl-notice">
-              <span>📦 Proxy → </span>
-              <a href="/address/${implAddr}" target="_blank" class="impl-link">${shortAddr}</a>
-            </div>`;
+            const implementationPath = Array.isArray(event.data.implementationPath)
+              ? event.data.implementationPath.filter(addr => /^0x[a-fA-F0-9]{40}$/.test(addr)).slice(0, 4)
+              : [];
+            const addresses = implementationPath.length > 0
+              ? implementationPath
+              : [event.data.implementationAddress].filter(addr => /^0x[a-fA-F0-9]{40}$/.test(addr));
+            if (addresses.length > 0) {
+              const label = addresses.length > 1 ? 'Proxy chain' : 'Proxy';
+              const links = addresses.map(addr => {
+                const shortAddr = addr.slice(0, 6) + '...' + addr.slice(-4);
+                return `<a href="/address/${escapeHtml(addr)}" target="_blank" class="impl-link">${escapeHtml(shortAddr)}</a>`;
+              }).join('<span> &rarr; </span>');
+              selectorsHtml += `<div class="impl-notice">
+                <span>${label} &rarr; </span>
+                ${links}
+              </div>`;
+            }
           }
 
           if (readFunctions.length > 0) {
@@ -3820,6 +3832,7 @@ function escapeHtml(str) {
               contractAddress,
               contractCreator: getContractCreatorInfo(),
               implementationAddress: event.data.implementationAddress || null,
+              implementationPath: Array.isArray(event.data.implementationPath) ? event.data.implementationPath : [],
               bytecodeSource: event.data.bytecodeSource || null,
               counts: {
                 functions: selectorRecords.length,
