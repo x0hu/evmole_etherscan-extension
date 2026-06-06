@@ -384,10 +384,41 @@ async function hedgedRpcRequest(method, params, { maxRpcs = QUERY_HEDGE_MAX_RPCS
   }
 }
 
-async function hedgedReadCall(contractAddress, calldata, { allowEmpty = false, maxRpcs, staggerMs } = {}) {
+function normalizeEthCallOptions(callOptions = {}) {
+  const options = {};
+  const from = String(callOptions?.from || '').trim();
+  const rawValue = callOptions?.value;
+
+  if (from) {
+    if (!/^0x[a-fA-F0-9]{40}$/.test(from)) {
+      throw new Error('Invalid eth_call from address');
+    }
+    options.from = from;
+  }
+
+  if (rawValue !== undefined && rawValue !== null && rawValue !== '') {
+    const text = String(rawValue).trim();
+    if (/^0x[a-fA-F0-9]+$/.test(text)) {
+      options.value = text === '0x' ? '0x0' : text;
+    } else if (/^\d+$/.test(text)) {
+      options.value = `0x${BigInt(text).toString(16)}`;
+    } else {
+      throw new Error('Invalid eth_call value');
+    }
+  }
+
+  return options;
+}
+
+async function hedgedReadCall(contractAddress, calldata, { allowEmpty = false, maxRpcs, staggerMs, callOptions } = {}) {
+  const callObject = {
+    to: contractAddress,
+    data: calldata,
+    ...normalizeEthCallOptions(callOptions)
+  };
   const winner = await hedgedRpcRequest(
     'eth_call',
-    [{ to: contractAddress, data: calldata }, 'latest'],
+    [callObject, 'latest'],
     { maxRpcs, staggerMs }
   );
   const data = winner.result;
@@ -884,17 +915,21 @@ function encodeReadFunctionCalldata(selector, inputTypes = [], inputValues = [])
   return normalizedSelector + encodeAbiSequence(inputTypes.map(parseAbiType), inputValues);
 }
 
-async function queryReadFunction(selector, signature, contractAddress, inputTypes = [], inputValues = []) {
+async function callContractFunction(selector, signature, contractAddress, inputTypes = [], inputValues = [], { callOptions = {}, callMode = 'read' } = {}) {
   const fnName = signature.split('(')[0];
   const lowerFnName = fnName.toLowerCase();
+  const simulated = callMode === 'simulate';
 
   // Do raw call first to check response length
   try {
     const calldata = encodeReadFunctionCalldata(selector, inputTypes, inputValues);
-    const rawResult = await hedgedReadCall(contractAddress, calldata);
+    const rawResult = await hedgedReadCall(contractAddress, calldata, {
+      callOptions: simulated ? { value: '0x0', ...callOptions } : callOptions
+    });
+    const callOptionsUsed = normalizeEthCallOptions(simulated ? { value: '0x0', ...callOptions } : callOptions);
 
     if (!rawResult.data || rawResult.data === '0x') {
-      return { success: false, error: 'Empty response' };
+      return { success: false, error: 'Empty response', callMode, simulated, callOptionsUsed };
     }
 
     const dataLen = (rawResult.data.length - 2) / 2; // bytes length
@@ -902,13 +937,13 @@ async function queryReadFunction(selector, signature, contractAddress, inputType
     if (lowerFnName === 'getowners') {
       const owners = decodeAddressArrayResult(rawResult.data);
       if (owners) {
-        return { success: true, result: owners.length ? owners.join(', ') : '[]' };
+        return { success: true, result: owners.length ? owners.join(', ') : '[]', callMode, simulated, callOptionsUsed };
       }
     }
 
     const stringResult = decodeStringResult(rawResult.data);
     if (stringResult !== null) {
-      return { success: true, result: stringResult };
+      return { success: true, result: stringResult, callMode, simulated, callOptionsUsed };
     }
 
     // Multiple 32-byte chunks = tuple, decode all
@@ -919,20 +954,33 @@ async function queryReadFunction(selector, signature, contractAddress, inputType
           success: true,
           result: decoded.formatted,
           rawChunks: decoded.chunks,
-          linkScanValue: autoDecodeTuple(decoded.chunks)
+          linkScanValue: autoDecodeTuple(decoded.chunks),
+          callMode,
+          simulated,
+          callOptionsUsed
         };
       }
     }
 
     if (dataLen === 32) {
-      return { success: true, result: await decodeSingleWordResult(rawResult.data, fnName) };
+      return { success: true, result: await decodeSingleWordResult(rawResult.data, fnName), callMode, simulated, callOptionsUsed };
     }
 
     // Fallback to raw hex
-    return { success: true, result: rawResult.data };
+    return { success: true, result: rawResult.data, callMode, simulated, callOptionsUsed };
   } catch (e) {
-    return { success: false, error: e.message || 'Query failed' };
+    let callOptionsUsed = {};
+    try {
+      callOptionsUsed = normalizeEthCallOptions(callMode === 'simulate' ? { value: '0x0', ...callOptions } : callOptions);
+    } catch {
+      callOptionsUsed = {};
+    }
+    return { success: false, error: e.message || 'Query failed', callMode, simulated, callOptionsUsed };
   }
+}
+
+async function queryReadFunction(selector, signature, contractAddress, inputTypes = [], inputValues = []) {
+  return callContractFunction(selector, signature, contractAddress, inputTypes, inputValues, { callMode: 'read' });
 }
 
 function decodeTupleResult(hexData) {
@@ -1041,6 +1089,20 @@ window.addEventListener('message', async (event) => {
     const result = await queryReadFunction(selector, signature, contractAddress, inputTypes, inputValues);
     window.postMessage({
       type: 'QUERY_RESULT',
+      selector,
+      purpose,
+      requestId,
+      ...result
+    }, '*');
+  }
+  if (event.data?.type === 'CALL_CONTRACT_FUNCTION') {
+    const { selector, signature, contractAddress, purpose, inputTypes, inputValues, requestId, callOptions, callMode } = event.data;
+    const result = await callContractFunction(selector, signature, contractAddress, inputTypes, inputValues, {
+      callOptions,
+      callMode: callMode === 'simulate' ? 'simulate' : 'read'
+    });
+    window.postMessage({
+      type: 'CALL_CONTRACT_FUNCTION_RESULT',
       selector,
       purpose,
       requestId,

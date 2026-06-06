@@ -33,6 +33,8 @@ function escapeHtml(str) {
   const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
   const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
   const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
+  const CALL_CONTRACT_FUNCTION_TYPE = 'CALL_CONTRACT_FUNCTION';
+  const CALL_CONTRACT_FUNCTION_RESULT_TYPE = 'CALL_CONTRACT_FUNCTION_RESULT';
   const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v19-token-limit-facts';
   const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash';
   const CODEX_SUMMARY_MODEL = 'gpt-5.5';
@@ -644,6 +646,48 @@ function escapeHtml(str) {
     return null;
   }
 
+  function abiTypeArraySuffix(type) {
+    const match = String(type || '').match(/(\[[0-9]*\])*$/);
+    return match ? match[0] : '';
+  }
+
+  function canonicalAbiInputType(input) {
+    if (!input || typeof input !== 'object') return '';
+    const rawType = String(input.type || '').trim();
+    if (!rawType) return '';
+    if (rawType.startsWith('tuple')) {
+      const components = Array.isArray(input.components) ? input.components : [];
+      return `(${components.map(canonicalAbiInputType).join(',')})${abiTypeArraySuffix(rawType)}`;
+    }
+    return rawType;
+  }
+
+  function canonicalAbiSignature(entry) {
+    if (!entry || entry.type !== 'function' || !entry.name) return '';
+    const inputs = Array.isArray(entry.inputs) ? entry.inputs : [];
+    return `${entry.name}(${inputs.map(canonicalAbiInputType).join(',')})`;
+  }
+
+  function buildVerifiedFunctionMaps(verifiedFunctions) {
+    const bySignature = new Map();
+    const byNameAndInputs = new Map();
+    (verifiedFunctions || []).forEach(entry => {
+      const signature = canonicalAbiSignature(entry);
+      if (!signature) return;
+      const inputTypes = (entry.inputs || []).map(canonicalAbiInputType);
+      const record = {
+        ...entry,
+        signature,
+        inputTypes,
+        inputNames: (entry.inputs || []).map((input, index) => String(input?.name || `arg${index}`).trim() || `arg${index}`),
+        stateMutability: entry.stateMutability || ''
+      };
+      bySignature.set(signature, record);
+      byNameAndInputs.set(`${entry.name.toLowerCase()}(${inputTypes.join(',')})`, record);
+    });
+    return { bySignature, byNameAndInputs };
+  }
+
   async function postVerifiedAbiToSignatureDb(settings, contractAddress) {
     const baseUrl = getSignatureDatabaseBaseUrl(settings);
     if (!baseUrl || !contractAddress) return;
@@ -1186,6 +1230,7 @@ function escapeHtml(str) {
     const chatToolReadRequests = new Map();
     const contractMentionAnalysisRequests = new Map();
     let latestSummaryContextBase = null;
+    let latestCallableFunctionRegistry = [];
     let latestSummaryResult = null;
     let autoSummaryHydrationKey = null;
     let summaryCacheMissKey = null;
@@ -1462,6 +1507,262 @@ function escapeHtml(str) {
       const firstError = inputs.map(input => getCheapInputError(input.dataset.paramType, input.value)).find(Boolean);
       button.disabled = Boolean(firstError);
       button.title = firstError || 'Query';
+    }
+
+    function functionNameFromSignature(signature) {
+      return String(signature || '').split('(')[0].trim();
+    }
+
+    function normalizeQuestion(value) {
+      return String(value || '').toLowerCase().replace(/[_-]+/g, ' ');
+    }
+
+    function inferCallableTags(record) {
+      const name = normalizeFunctionNameForMatch(record?.name || record?.signature || '');
+      const tags = [];
+      const add = (tag, ...patterns) => {
+        if (patterns.some(pattern => functionNameHas(name, pattern))) tags.push(tag);
+      };
+
+      add('owner', 'owner', 'ownership');
+      add('admin', 'admin', 'operator', 'manager', 'governor', 'role', 'controller');
+      add('fee', 'fee', 'tax', 'bps', 'split', 'royalty');
+      add('limit', 'limit', 'cap', 'max', 'min', 'threshold', 'cooldown');
+      add('token', 'name', 'symbol', 'decimals', 'supply', 'balanceof', 'allowance', 'transfer', 'approve');
+      add('router', 'router', 'factory', 'pair', 'pool', 'weth', 'poolmanager', 'poolkey');
+      add('nft', 'tokenuri', 'uri', 'ownerof', 'getapproved', 'approvalforall');
+      add('launch', 'trading', 'launch', 'sale', 'enabled', 'finalize', 'paused', 'pause');
+      add('metadata', 'uri', 'url', 'metadata', 'image');
+      return [...new Set(tags)];
+    }
+
+    function buildCallableFunctionRegistry(selectorRecords, verifiedFunctions) {
+      const verifiedMaps = buildVerifiedFunctionMaps(verifiedFunctions || []);
+      return (selectorRecords || []).map(record => {
+        const signature = String(record?.signature || '').trim();
+        const name = functionNameFromSignature(signature);
+        if (!signature || signature === 'Unknown' || !name) return null;
+
+        const rawInputTypes = splitTopLevelAbiTypes(record.args || '');
+        const verified = verifiedMaps.bySignature.get(signature)
+          || verifiedMaps.byNameAndInputs.get(`${name.toLowerCase()}(${rawInputTypes.join(',')})`);
+        const inputTypes = (verified?.inputTypes?.length ? verified.inputTypes : rawInputTypes)
+          .map(normalizeAbiType);
+        if (inputTypes.some(type => !type)) return null;
+
+        const mutability = String(verified?.stateMutability || record.mutability || '').toLowerCase();
+        const isRead = mutability === 'view' || mutability === 'pure';
+        const inputNames = verified?.inputNames?.length === inputTypes.length
+          ? verified.inputNames
+          : inputTypes.map((_, index) => `arg${index}`);
+        const callable = {
+          selector: normalizeSelectorId(record.selector),
+          signature,
+          name,
+          mutability,
+          inputTypes,
+          inputNames,
+          inputCount: inputTypes.length,
+          callMode: isRead ? 'read' : 'simulate',
+          isRead,
+          tags: []
+        };
+        callable.tags = inferCallableTags(callable);
+        return callable;
+      }).filter(record => record?.selector && record.selector.length === 10);
+    }
+
+    function extractQuestionAddresses(question) {
+      return [...String(question || '').matchAll(/0x[a-fA-F0-9]{40}/g)]
+        .map(match => match[0])
+        .filter((address, index, list) => list.findIndex(entry => normalizeAddressKey(entry) === normalizeAddressKey(address)) === index);
+    }
+
+    function extractQuestionIntegers(question) {
+      const text = String(question || '');
+      return [...text.matchAll(/\b\d{1,78}\b/g)]
+        .filter(match => text[match.index - 1] !== '.' && text[match.index + match[0].length] !== '.')
+        .map(match => match[0]);
+    }
+
+    function extractQuestionBools(question) {
+      const values = [];
+      if (/\btrue\b/i.test(question)) values.push('true');
+      if (/\bfalse\b/i.test(question)) values.push('false');
+      return values;
+    }
+
+    function extractEthValueWei(question) {
+      const match = String(question || '').match(/\b(\d+(?:\.\d+)?)\s*(?:eth|ether)\b/i);
+      if (!match) return null;
+      try {
+        return decimalToScaledInteger(match[1], 18);
+      } catch {
+        return null;
+      }
+    }
+
+    function extractSimulationFromAddress(question) {
+      const match = String(question || '').match(/\b(?:as|sender)\s*(0x[a-fA-F0-9]{40})\b/i);
+      return match ? match[1] : '';
+    }
+
+    function isSimulationQuestion(question) {
+      return /\b(?:simulate|simulation|eth_call|call|revert|fail|fails|would|try|test)\b/i.test(question);
+    }
+
+    function questionMentionsFunction(question, callable) {
+      const normalized = normalizeQuestion(question);
+      const name = String(callable?.name || '').toLowerCase();
+      const readableName = name.replace(/_/g, ' ');
+      const signature = String(callable?.signature || '').toLowerCase();
+      const actionWords = ['buy', 'sell', 'swap', 'transfer', 'approve', 'mint', 'burn', 'deposit', 'withdraw', 'stake', 'unstake', 'claim', 'contribute', 'refund'];
+      return Boolean(name && (
+        normalized.includes(name.toLowerCase())
+        || normalized.includes(readableName)
+        || normalized.replace(/\s+/g, '').includes(signature.replace(/\s+/g, ''))
+        || actionWords.some(word => new RegExp(`\\b${word}\\b`, 'i').test(question) && functionNameHas(name, word))
+      ));
+    }
+
+    function functionMatchesIntent(question, callable) {
+      const normalized = normalizeQuestion(question);
+      const tags = new Set(callable.tags || []);
+      const name = String(callable.name || '').toLowerCase();
+
+      if (questionMentionsFunction(question, callable)) return true;
+      if (/\b(?:who owns|owner|ownership)\b/.test(normalized)) {
+        if (name === 'ownerof' && !/\b(?:token|token\s*id|#|nft)\b/.test(normalized)) return false;
+        return tags.has('owner') || name === 'owner';
+      }
+      if (/\b(?:admin|operator|manager|role|permission|privileged)\b/.test(normalized)) return tags.has('admin') || tags.has('owner');
+      if (/\b(?:fee|fees|tax|taxes|bps|royalty)\b/.test(normalized)) return tags.has('fee');
+      if (/\b(?:limit|cap|max|min|threshold|cooldown|rule|rules)\b/.test(normalized)) return tags.has('limit');
+      if (/\b(?:router|factory|pair|pool|weth|pool manager)\b/.test(normalized)) return tags.has('router');
+      if (/\b(?:trading|launch|paused|enabled|finalize|sale)\b/.test(normalized)) return tags.has('launch');
+      if (/\b(?:name|symbol|decimals|supply|token)\b/.test(normalized)) return tags.has('token') && callable.inputCount === 0;
+      if (/\b(?:balance|balanceof)\b/.test(normalized)) return name === 'balanceof';
+      if (/\b(?:allowance)\b/.test(normalized)) return name === 'allowance';
+      if (/\b(?:token\s*uri|tokenuri|metadata|image|svg|animation|nft)\b/.test(normalized)) return tags.has('nft') || tags.has('metadata');
+      if (/\btoken\b/.test(normalized) && extractTokenId(question) && (tags.has('nft') || tags.has('metadata'))) return true;
+      return false;
+    }
+
+    function rankCallableForQuestion(question, callable) {
+      let score = 0;
+      if (questionMentionsFunction(question, callable)) score += 1000;
+      if (callable.isRead) score += 100;
+      if (callable.inputCount === 0) score += 50;
+      if (functionMatchesIntent(question, callable)) score += 200;
+      if (['owner', 'name', 'symbol', 'decimals', 'totalsupply', 'balanceof', 'allowance', 'tokenuri'].includes(callable.name.toLowerCase())) score += 40;
+      return score;
+    }
+
+    function buildKnownArgumentAddresses() {
+      const creator = getContractCreatorInfo();
+      return {
+        contract: contractAddress,
+        creator: creator?.address || ''
+      };
+    }
+
+    function resolveCallableArguments(question, callable) {
+      const inputTypes = callable.inputTypes || [];
+      const addressValues = extractQuestionAddresses(question);
+      const integerValues = extractQuestionIntegers(question);
+      const boolValues = extractQuestionBools(question);
+      const ethValueWei = extractEthValueWei(question);
+      const simulationFrom = callable.callMode === 'simulate' ? extractSimulationFromAddress(question) : '';
+      const knownAddresses = buildKnownArgumentAddresses();
+      const args = [];
+      const missing = [];
+      let addressIndex = 0;
+      let integerIndex = 0;
+      let boolIndex = 0;
+
+      for (let index = 0; index < inputTypes.length; index += 1) {
+        const type = inputTypes[index];
+        const inputName = String(callable.inputNames?.[index] || `arg${index}`);
+        const lowerName = inputName.toLowerCase();
+
+        if (type === 'address') {
+          const value = addressValues[addressIndex++]
+            || (/contract|token|this/.test(lowerName) ? knownAddresses.contract : '')
+            || (/creator|deployer/.test(lowerName) ? knownAddresses.creator : '');
+          if (value && /^0x[a-fA-F0-9]{40}$/.test(value)) {
+            args.push(value);
+          } else {
+            missing.push(`${inputName || `arg${index}`} (${type})`);
+          }
+          continue;
+        }
+
+        if (isUintAbiInput(type) || type.startsWith('int')) {
+          const value = (/amount|value|eth|wei/.test(lowerName) && ethValueWei) ? ethValueWei : integerValues[integerIndex++];
+          if (value && /^(?:0x[a-fA-F0-9]+|\d+)$/.test(value)) {
+            args.push(value);
+          } else {
+            missing.push(`${inputName || `arg${index}`} (${type})`);
+          }
+          continue;
+        }
+
+        if (type === 'bool') {
+          const value = boolValues[boolIndex++];
+          if (value) {
+            args.push(value);
+          } else {
+            missing.push(`${inputName || `arg${index}`} (${type})`);
+          }
+          continue;
+        }
+
+        if (type === 'bytes' || /^bytes\d+$/.test(type)) {
+          const hex = String(question || '').match(/0x[a-fA-F0-9]+/)?.[0] || '';
+          if (hex && hex.length % 2 === 0) {
+            args.push(hex);
+          } else {
+            missing.push(`${inputName || `arg${index}`} (${type})`);
+          }
+          continue;
+        }
+
+        if (type === 'string') {
+          missing.push(`${inputName || `arg${index}`} (${type})`);
+          continue;
+        }
+
+        missing.push(`${inputName || `arg${index}`} (${type})`);
+      }
+
+      return {
+        args,
+        missing,
+        callOptions: callable.callMode === 'simulate'
+          ? {
+            ...(ethValueWei ? { value: ethValueWei } : {}),
+            ...(simulationFrom ? { from: simulationFrom } : {})
+          }
+          : {}
+      };
+    }
+
+    function planChatFunctionCalls(question) {
+      const registry = latestCallableFunctionRegistry || [];
+      const simulationRequested = isSimulationQuestion(question);
+      const matching = registry
+        .filter(callable => functionMatchesIntent(question, callable))
+        .filter(callable => callable.isRead || (simulationRequested && questionMentionsFunction(question, callable)))
+        .map(callable => ({ callable, score: rankCallableForQuestion(question, callable) }))
+        .filter(entry => entry.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map(entry => entry.callable);
+
+      const limit = simulationRequested ? 3 : 6;
+      return matching.slice(0, limit).map(callable => ({
+        callable,
+        ...resolveCallableArguments(question, callable)
+      }));
     }
 
     function isLikelyLinkReadFunction(signature) {
@@ -3346,10 +3647,6 @@ function escapeHtml(str) {
       return item;
     }
 
-    function isTokenUriQuestion(question) {
-      return /\b(?:nft|token\s*uri|tokenuri|metadata|image|svg|animation)\b/i.test(question);
-    }
-
     function extractTokenId(question) {
       const text = String(question || '');
       const specific = text.match(/\btoken(?:\s*id)?\s*(?:#|:|=)?\s*(\d+)\b/i)
@@ -3360,30 +3657,18 @@ function escapeHtml(str) {
       return generic ? generic[1] : null;
     }
 
-    function findTokenUriReadFunction() {
-      const functions = latestSummaryContextBase?.functions || [];
-      return functions.find(record => {
-        const name = String(record?.signature || '').split('(')[0].toLowerCase();
-        const paramTypes = splitTopLevelAbiTypes(record?.args || '').map(normalizeAbiType).filter(Boolean);
-        return record?.isRead
-          && record.signature !== 'Unknown'
-          && (name === 'tokenuri' || name === 'nfttokenuri' || name.endsWith('tokenuri'))
-          && paramTypes.length === 1
-          && /^uint(?:[0-9]+)?$/.test(paramTypes[0]);
-      }) || null;
-    }
-
-    function queryChatReadFunction(record, inputValues) {
+    function callContractFunctionFromPage(callable, inputValues, callOptions = {}) {
       return new Promise(resolve => {
-        const inputTypes = splitTopLevelAbiTypes(record.args || '').map(normalizeAbiType).filter(Boolean);
-        const requestId = `chat-tool-${Date.now()}-${record.selector.slice(2)}`;
+        const requestId = `chat-tool-${Date.now()}-${callable.selector.slice(2)}-${Math.random().toString(16).slice(2)}`;
         const timeout = window.setTimeout(() => {
           chatToolReadRequests.delete(requestId);
           resolve({
             success: false,
-            selector: record.selector,
-            signature: record.signature,
-            error: 'Read query timed out'
+            selector: callable.selector,
+            signature: callable.signature,
+            callMode: callable.callMode,
+            simulated: callable.callMode === 'simulate',
+            error: 'Contract call timed out'
           });
         }, 10000);
 
@@ -3391,22 +3676,28 @@ function escapeHtml(str) {
           window.clearTimeout(timeout);
           resolve({
             success: !!payload.success,
-            selector: record.selector,
-            signature: record.signature,
+            selector: callable.selector,
+            signature: callable.signature,
+            callMode: payload.callMode || callable.callMode,
+            simulated: payload.simulated ?? callable.callMode === 'simulate',
             result: payload.success ? String(payload.result ?? '') : null,
-            error: payload.success ? null : String(payload.error || 'Read query failed')
+            rawChunks: payload.rawChunks || null,
+            callOptionsUsed: payload.callOptionsUsed || {},
+            error: payload.success ? null : String(payload.error || 'Contract call failed')
           });
         });
 
         window.postMessage({
-          type: 'QUERY_READ_FUNCTION',
+          type: CALL_CONTRACT_FUNCTION_TYPE,
           purpose: CHAT_TOOL_READ_PURPOSE,
           requestId,
-          selector: record.selector,
-          signature: record.signature,
+          selector: callable.selector,
+          signature: callable.signature,
           contractAddress,
-          inputTypes,
-          inputValues
+          inputTypes: callable.inputTypes || [],
+          inputValues,
+          callMode: callable.callMode,
+          callOptions
         }, '*');
       });
     }
@@ -3429,13 +3720,23 @@ function escapeHtml(str) {
       };
     }
 
+    function getTokenToolMetadata(toolContext) {
+      if (!toolContext) return null;
+      if (toolContext.kind === 'token_uri_fetch') return toolContext;
+      if (toolContext.kind === 'contract_function_calls') {
+        return (toolContext.calls || []).map(call => call.tokenMetadata).find(Boolean) || null;
+      }
+      return null;
+    }
+
     function getTokenPreviewImageSrc(toolContext) {
-      if (!toolContext || toolContext.kind !== 'token_uri_fetch') return '';
-      const asset = toolContext.assetResource?.ok ? toolContext.assetResource : null;
-      const token = toolContext.tokenResource?.ok ? toolContext.tokenResource : null;
+      const metadata = getTokenToolMetadata(toolContext);
+      if (!metadata) return '';
+      const asset = metadata.assetResource?.ok ? metadata.assetResource : null;
+      const token = metadata.tokenResource?.ok ? metadata.tokenResource : null;
 
       if (asset) {
-        const assetUri = String(toolContext.assetUri || asset.uri || '').trim();
+        const assetUri = String(metadata.assetUri || asset.uri || '').trim();
         const assetText = String(asset.textPreview || '');
         if (/^data:image\//i.test(assetUri)) return assetUri;
         if (/^https?:\/\//i.test(asset.fetchedUri || assetUri) && /^image\//i.test(asset.contentType || '')) {
@@ -3448,7 +3749,7 @@ function escapeHtml(str) {
 
       if (token) {
         const tokenText = String(token.textPreview || '');
-        const tokenUri = String(toolContext.tokenUri || token.uri || '').trim();
+        const tokenUri = String(metadata.tokenUri || token.uri || '').trim();
         if (/^data:image\//i.test(tokenUri)) return tokenUri;
         if (/svg/i.test(token.contentType || '') || /^<svg[\s>]/i.test(tokenText.trim())) {
           return svgToDataImage(tokenText);
@@ -3461,38 +3762,21 @@ function escapeHtml(str) {
     function renderTokenToolPreview(toolContext) {
       const src = getTokenPreviewImageSrc(toolContext);
       if (!src) return '';
-      const tokenId = escapeHtml(toolContext.tokenId || '');
+      const metadata = getTokenToolMetadata(toolContext);
+      const tokenId = escapeHtml(metadata?.tokenId || '');
       return `<div class="evmole-chat-token-preview">
         <div class="evmole-chat-token-preview-label">Token ${tokenId} preview</div>
         <img src="${escapeHtml(src)}" alt="Token ${tokenId} preview" loading="lazy">
       </div>`;
     }
 
-    async function buildChatToolContext(question) {
-      if (!isTokenUriQuestion(question)) return null;
+    async function fetchTokenMetadataForCall(callable, callResult, inputValues) {
+      const name = String(callable.name || '').toLowerCase();
+      if (!(name === 'tokenuri' || name === 'nfttokenuri' || name.endsWith('tokenuri'))) return null;
+      if (!callResult?.success) return null;
 
-      const tokenUriFunction = findTokenUriReadFunction();
-      if (!tokenUriFunction) return null;
-
-      const tokenId = extractTokenId(question);
-      if (!tokenId) {
-        return {
-          kind: 'missing_token_id',
-          message: 'Which token ID should I use?'
-        };
-      }
-
-      const read = await queryChatReadFunction(tokenUriFunction, [tokenId]);
-      if (!read.success) {
-        return {
-          kind: 'token_uri_read',
-          tokenId,
-          function: tokenUriFunction.signature,
-          read
-        };
-      }
-
-      const tokenUri = String(read.result || '').trim();
+      const tokenUri = String(callResult.result || '').trim();
+      if (!tokenUri) return null;
       const tokenResource = await chromeMessage({
         type: FETCH_TOKEN_URI_TYPE,
         uri: tokenUri
@@ -3509,13 +3793,53 @@ function escapeHtml(str) {
 
       return {
         kind: 'token_uri_fetch',
-        tokenId,
-        function: tokenUriFunction.signature,
-        read,
+        tokenId: String(inputValues?.[0] ?? ''),
+        function: callable.signature,
         tokenUri,
         tokenResource: compactTokenFetchResult(tokenResource),
         assetUri,
         assetResource: compactTokenFetchResult(assetResource)
+      };
+    }
+
+    async function buildChatToolContext(question) {
+      const plannedCalls = planChatFunctionCalls(question);
+      if (plannedCalls.length === 0) return null;
+
+      const missingPlan = plannedCalls.find(plan => plan.missing?.length);
+      if (missingPlan) {
+        return {
+          kind: 'missing_args',
+          message: `Which value should I use for ${missingPlan.callable.signature}: ${missingPlan.missing.join(', ')}?`
+        };
+      }
+
+      const calls = [];
+      for (const plan of plannedCalls) {
+        const result = await callContractFunctionFromPage(plan.callable, plan.args, plan.callOptions);
+        const tokenMetadata = await fetchTokenMetadataForCall(plan.callable, result, plan.args).catch(() => null);
+        calls.push({
+          function: plan.callable.signature,
+          selector: plan.callable.selector,
+          name: plan.callable.name,
+          mutability: plan.callable.mutability,
+          callMode: result.callMode || plan.callable.callMode,
+          simulated: !!result.simulated,
+          args: plan.args,
+          argTypes: plan.callable.inputTypes,
+          callOptions: result.callOptionsUsed || plan.callOptions || {},
+          success: !!result.success,
+          result: result.success ? result.result : null,
+          error: result.success ? null : result.error,
+          rawChunks: result.rawChunks || undefined,
+          tokenMetadata: tokenMetadata || undefined
+        });
+      }
+
+      return {
+        kind: 'contract_function_calls',
+        note: 'These are local non-persistent eth_call results. callMode "simulate" means no transaction was signed and no state was changed.',
+        calls
       };
     }
 
@@ -3530,7 +3854,7 @@ function escapeHtml(str) {
       try {
         const context = await buildChatContext();
         const toolContext = await buildChatToolContext(trimmed);
-        if (toolContext?.kind === 'missing_token_id') {
+        if (toolContext?.kind === 'missing_args') {
           loadingItem.classList.remove('loading');
           loadingItem.innerHTML = renderChatText(toolContext.message);
           chatHistory.push({ role: 'assistant', content: toolContext.message });
@@ -3697,6 +4021,11 @@ function escapeHtml(str) {
           const readFunctions = [];
           const writeFunctions = [];
           const selectorRecords = [];
+          const verifiedAbi = getVerifiedContractAbi();
+          const verifiedFunctions = Array.isArray(verifiedAbi)
+            ? verifiedAbi.filter(entry => entry?.type === 'function').slice(0, 200)
+            : [];
+          const verifiedFunctionMaps = buildVerifiedFunctionMaps(verifiedFunctions);
 
           const compareFunctionDisplayItems = (a, b) => {
             const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
@@ -3714,13 +4043,17 @@ function escapeHtml(str) {
             if (!selectorId || !argsAndMutability) return;
             const [args, mutability] = argsAndMutability.split(' ');
             const functionName = signatureInfo.trim();
+            const rawParamTypes = splitTopLevelAbiTypes(args);
+            const verifiedFunction = verifiedFunctionMaps.bySignature.get(functionName)
+              || verifiedFunctionMaps.byNameAndInputs.get(`${functionName.split('(')[0].toLowerCase()}(${rawParamTypes.join(',')})`);
+            const effectiveMutability = verifiedFunction?.stateMutability || mutability;
 
             const isNonStandard = !standardFunctionSignatures.includes(functionName) &&
                                   !standardFunctionSelectors.has(selectorId.toLowerCase());
             const highlightClass = isNonStandard ? 'highlight-non-standard' : '';
 
-            const isReadFunction = mutability === 'view' || mutability === 'pure';
-            const normalizedParamTypes = splitTopLevelAbiTypes(args).map(normalizeAbiType);
+            const isReadFunction = effectiveMutability === 'view' || effectiveMutability === 'pure';
+            const normalizedParamTypes = (verifiedFunction?.inputTypes?.length ? verifiedFunction.inputTypes : rawParamTypes).map(normalizeAbiType);
             const hasParseableParams = normalizedParamTypes.length > 0 && normalizedParamTypes.every(Boolean);
             const isNoArgRead = isReadFunction && args === '()' && functionName !== 'Unknown';
             const isParameterizedRead = isReadFunction && hasParseableParams && functionName !== 'Unknown';
@@ -3749,7 +4082,7 @@ function escapeHtml(str) {
                 <div class="selector-info">
                   <span class="selector-id">${selectorId}</span>
                   <span class="arguments">${args}</span>
-                  <span class="mutability">${mutability}</span>
+                  <span class="mutability">${effectiveMutability}</span>
                 </div>
                 <div class="function-info">
                   <span class="function-name">${functionName}</span>${queryIndicator}
@@ -3761,8 +4094,10 @@ function escapeHtml(str) {
             selectorRecords.push({
               selector: selectorId,
               args,
-              mutability,
+              mutability: effectiveMutability,
               signature: functionName,
+              inputTypes: normalizedParamTypes.filter(Boolean),
+              inputNames: verifiedFunction?.inputNames || [],
               isRead: isReadFunction,
               isUnknown: functionName === 'Unknown'
             });
@@ -3820,10 +4155,7 @@ function escapeHtml(str) {
           }
 
           if (panel && panel.parentNode) {
-            const verifiedAbi = getVerifiedContractAbi();
-            const verifiedFunctions = Array.isArray(verifiedAbi)
-              ? verifiedAbi.filter(entry => entry?.type === 'function').slice(0, 200)
-              : [];
+            latestCallableFunctionRegistry = buildCallableFunctionRegistry(selectorRecords, verifiedFunctions);
             latestSummaryContextBase = {
               promptVersion: SUMMARY_PROMPT_VERSION,
               model: SUMMARY_MODEL,
@@ -4098,6 +4430,19 @@ function escapeHtml(str) {
             resultDiv.innerHTML = renderInlineLinks(error, { addressLinks: false });
           }
         }
+      }
+
+      if (event.data && event.data.type === CALL_CONTRACT_FUNCTION_RESULT_TYPE) {
+        if (event.data.success) {
+          panel.addDiscoveredLinks?.(extractLinksFromResultValue(event.data.result));
+          panel.addDiscoveredLinks?.(extractLinksFromResultValue(event.data.linkScanValue));
+        }
+        const resolver = chatToolReadRequests.get(event.data.requestId);
+        if (resolver) {
+          chatToolReadRequests.delete(event.data.requestId);
+          resolver(event.data);
+        }
+        return;
       }
 
       if (event.data && event.data.type === 'ANALYZE_CONTRACT_ADDRESS_RESULT') {
