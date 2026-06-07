@@ -148,6 +148,12 @@ function formatSelectorDetail({ selector, args, mutability, signature }) {
   return `${selector}: ${args} ${mutability}\n    ${signature}`;
 }
 
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(String(value || ''));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 function isSafeProxyRuntimeBytecode(bytecode) {
   if (!bytecode || typeof bytecode !== 'string' || !bytecode.startsWith('0x')) return false;
   const normalized = bytecode.toLowerCase();
@@ -1200,6 +1206,8 @@ async function analyzeContractAddress(targetAddress) {
       selectors: SAFE_FALLBACK_FUNCTIONS.map(formatSelectorDetail),
       implementationAddress: null,
       implementationPath: [],
+      analyzedBytecode: code,
+      analyzedBytecodeHash: await sha256Hex(code),
       bytecodeSource: 'rpc',
       rpc: fetched.rpc || null
     };
@@ -1243,6 +1251,8 @@ async function analyzeContractAddress(targetAddress) {
     selectors: selectorsWithDetails,
     implementationAddress: implInfo?.address || null,
     implementationPath: implInfo?.path || [],
+    analyzedBytecode: bytecodeToAnalyze,
+    analyzedBytecodeHash: await sha256Hex(bytecodeToAnalyze),
     bytecodeSource: 'rpc',
     rpc: fetched.rpc || null
   };
@@ -1376,6 +1386,8 @@ async function extractFunctions() {
         selectors: finalSelectors,
         implementationAddress: null,
         implementationPath: [],
+        analyzedBytecode: code,
+        analyzedBytecodeHash: await sha256Hex(code),
         bytecodeSource
       }, '*');
       return;
@@ -1432,6 +1444,8 @@ async function extractFunctions() {
       selectors: finalSelectors,
       implementationAddress: implInfo?.address || null,
       implementationPath: implInfo?.path || [],
+      analyzedBytecode: bytecodeToAnalyze,
+      analyzedBytecodeHash: await sha256Hex(bytecodeToAnalyze),
       bytecodeSource
     }, '*');
   } catch (e) {

@@ -5,6 +5,7 @@ const OPENROUTER_SUMMARY_TYPE = 'EVMOLE_OPENROUTER_SUMMARY';
 const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
 const OPENROUTER_CHAT_TYPE = 'EVMOLE_OPENROUTER_CHAT';
 const CODEX_SUMMARY_TYPE = 'EVMOLE_CODEX_SUMMARY';
+const CODEX_SELECTOR_NAMES_TYPE = 'EVMOLE_CODEX_SELECTOR_NAMES';
 const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
 const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
 const CODEX_LOGIN_TYPE = 'EVMOLE_CODEX_LOGIN';
@@ -30,9 +31,17 @@ const CODEX_TOKEN_REFRESH_SKEW_MS = 60 * 1000;
 const TOKEN_URI_FETCH_TIMEOUT_MS = 8500;
 const TOKEN_URI_MAX_BYTES = 1024 * 1024;
 const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v19-token-limit-facts';
+const SELECTOR_NAME_PROMPT_VERSION = 'evmole-selector-heuristic-v3';
 const SUMMARY_SYSTEM_PROMPT = `You are Evmole's concise EVM contract analyst. Use only the supplied evidence. Do not invent behavior from function names alone. Prioritize interpreted facts and numbers first: contribution amounts, max raise, min/max buys, taxes/fees, timestamps, cooldowns, bonding-curve parameters, routers/pairs, and privileged roles. Convert wei/token units and epoch timestamps when direct evidence supports the conversion. For token amounts, never assume decimals: only convert raw token integers when a decimals() read result is present in the evidence. Keep prose short and put explanations after facts. Never claim safety or give investment advice. Return only valid json.`;
 const CHAT_SYSTEM_PROMPT = 'You are Evmole contract chat. Answer questions about the current EVM contract using only the supplied evidence, toolContext, relatedContracts, mentionedContracts, and prior chat. Be concise. If mentionedContracts are provided, compare the explicitly mentioned contracts to the current contract even when creator/deployer evidence differs or is missing. If relatedContracts are provided, compare only the supplied contracts and explain how they may fit together from creator, summaries, facts, function counts, and explicit evidence; do not infer integration beyond evidence. If toolContext contains contract_function_calls, treat read calls as current eth_call results and simulated calls as non-persistent eth_call simulations: no transaction was signed, no wallet executed anything, and no state changed. Use simulation reverts/errors as evidence of the current call path only, not proof that a future signed transaction must fail. If toolContext contains NFT metadata, image, SVG, or JSON, summarize the fetched facts directly without naming internal read functions unless the user asks. If evidence is missing, ask for the missing value plainly. Do not claim safety or give investment advice.';
+const SELECTOR_NAME_SYSTEM_PROMPT = `You name unknown EVM function selectors for UI context. Use only the supplied bytecode and selector metadata. Return provisional heuristic names, not real ABI claims. Never imply a generated name is verified. Return only valid json.`;
+const BACKGROUND_RESULT_TTL_MS = 5 * 60 * 1000;
 const openRouterSummaryInFlight = new Map();
+const openRouterSummaryRecentResults = new Map();
+const codexSummaryInFlight = new Map();
+const codexSummaryRecentResults = new Map();
+const selectorNamesInFlight = new Map();
+const selectorNamesRecentResults = new Map();
 const SUMMARY_USER_PROMPT_PREFIX = `Analyze this EVM contract from the supplied evidence.
 
 Required JSON shape:
@@ -64,6 +73,7 @@ Rules:
 - Keep output compact: at most 4 facts, 2 key behaviors, 3 implementation_uniqueness points, and 2 read_context entries.
 - Put concrete facts in "facts" first. Use short labels like "Per contributor", "Max contributors", "Sale window", "Buy tax", "Sell tax", "Cooldown", "Router", "Pair", "Bonding curve".
 - Prefer evidence.functionSurface over raw selector counts. Infer purpose from grouped standard/custom reads, custom writes, parameter shapes, mutability, and meaningHint fields.
+- If evidence.functionSurface.heuristicUnknowns exists, treat those names as provisional AI-generated hints only, not verified ABI names.
 - evidence.materialReadValues is intentionally selective. Use those values for concrete addresses, limits, fees, supplies, pool configuration, or state only when present; do not require read values to infer broad purpose from function names and parameters.
 - If evidence.localSummaryBaseline exists, preserve its token identity, supply, and creator facts unless later evidence contradicts them.
 - If evidence.erc20EnrichmentFocus exists, this is an ERC-20 token that already has local baseline facts. Focus the summary, key_behaviors, and implementation_uniqueness on uncommon/custom functions and how they could affect use in a theorized scenario, using cautious language such as "suggests", "appears", or "could". Do not merely restate the standard ERC-20 surface.
@@ -81,6 +91,49 @@ Rules:
 - If a number is inferred from multiple reads, state the interpreted result and cite the sources.
 
 Evidence JSON:`;
+
+function getDedupeKey(message) {
+    return typeof message?.dedupeKey === 'string' ? message.dedupeKey.slice(0, 4000) : '';
+}
+
+function getRecentBackgroundResult(resultMap, dedupeKey) {
+    if (!dedupeKey) return null;
+    const entry = resultMap.get(dedupeKey);
+    if (!entry) return null;
+    if (Date.now() - entry.storedAt > BACKGROUND_RESULT_TTL_MS) {
+        resultMap.delete(dedupeKey);
+        return null;
+    }
+    return entry.value;
+}
+
+function rememberBackgroundResult(resultMap, dedupeKey, value) {
+    if (!dedupeKey || !value?.ok) return;
+    resultMap.set(dedupeKey, { value, storedAt: Date.now() });
+    if (resultMap.size <= 50) return;
+    const oldestKey = resultMap.keys().next().value;
+    if (oldestKey) resultMap.delete(oldestKey);
+}
+
+function getBackgroundDedupePromise(inFlightMap, recentResultMap, dedupeKey, createPromise) {
+    const recentResult = getRecentBackgroundResult(recentResultMap, dedupeKey);
+    if (recentResult) return Promise.resolve(recentResult);
+    if (!dedupeKey) return createPromise();
+
+    let promise = inFlightMap.get(dedupeKey);
+    if (!promise) {
+        promise = Promise.resolve().then(createPromise);
+        inFlightMap.set(dedupeKey, promise);
+        promise.then(
+            result => {
+                inFlightMap.delete(dedupeKey);
+                rememberBackgroundResult(recentResultMap, dedupeKey, result);
+            },
+            () => inFlightMap.delete(dedupeKey)
+        );
+    }
+    return promise;
+}
 
 function buildSummaryRequestBody(context, { retry = false, jsonMode = true, providerSort = 'latency' } = {}) {
     const body = {
@@ -589,6 +642,146 @@ function normalizeSummaryPayload(payload, context = null) {
     };
 }
 
+function normalizeSelectorId(value) {
+    const selector = String(value || '').trim().toLowerCase();
+    return /^0x[0-9a-f]{8}$/.test(selector) ? selector : '';
+}
+
+function normalizeHeuristicName(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const cleaned = raw
+        .replace(/\([^)]*\)/g, '')
+        .replace(/[^A-Za-z0-9_]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 80);
+    if (!cleaned) return '';
+    const withPrefix = /^[A-Za-z_]/.test(cleaned) ? cleaned : `fn_${cleaned}`;
+    return /^[A-Za-z_][A-Za-z0-9_]{1,79}$/.test(withPrefix) ? withPrefix : '';
+}
+
+const GENERIC_HEURISTIC_NAMES = new Set([
+    'readconstant',
+    'readflag',
+    'readstoredvalue',
+    'readaddressconfig',
+    'readaddressvalue',
+    'readindexedconfig',
+    'readobservation',
+    'readconfigtuple',
+    'computescaledvalue',
+    'unknownaction',
+    'unknownread',
+    'unknownfunction',
+]);
+const WRITE_ACTION_NAME_RE = /(set|update|write|configure|enable|disable|transfer|claim|withdraw|deposit|mint|burn|swap|execute|create|delete|remove|add|init|finalize)/i;
+
+function unknownSelectorContextBySelector(context = null) {
+    return new Map((context?.unknownSelectors || [])
+        .map(entry => [normalizeSelectorId(entry?.selector), entry])
+        .filter(([selector]) => selector));
+}
+
+function assessSelectorNameSemantics(entry, selectorContext) {
+    const name = String(entry?.heuristicName || '');
+    const lowerName = name.toLowerCase();
+    const mutability = String(selectorContext?.mutability || '').toLowerCase();
+    const args = String(selectorContext?.args || '').trim();
+    const inputCount = Array.isArray(selectorContext?.inputTypes)
+        ? selectorContext.inputTypes.length
+        : (args && args !== '()' ? 1 : 0);
+
+    if ((mutability === 'pure' || mutability === 'view') && WRITE_ACTION_NAME_RE.test(name)) {
+        return `${mutability} selector named like a write/action function`;
+    }
+    if (mutability === 'pure' && (args === '()' || inputCount === 0) && !/^constant[A-Z0-9]/.test(name)) {
+        return 'pure no-arg selector should be a specific constant-style name';
+    }
+    if (inputCount === 0 && /(by|for|of|at)$/.test(lowerName)) {
+        return 'no-arg selector name implies a missing parameter';
+    }
+    if (inputCount > 0 && /^constant[A-Z0-9]/.test(name)) {
+        return 'parameterized selector should not be named as a fixed no-arg constant';
+    }
+    return '';
+}
+
+function normalizeSelectorNamePayload(payload, context = null) {
+    const requested = new Set((context?.unknownSelectors || [])
+        .map(entry => normalizeSelectorId(entry?.selector || entry))
+        .filter(Boolean));
+    const values = Array.isArray(payload?.names)
+        ? payload.names
+        : (Array.isArray(payload) ? payload : []);
+
+    const seen = new Set();
+    return values.map(entry => {
+        const selector = normalizeSelectorId(entry?.selector);
+        const heuristicName = normalizeHeuristicName(entry?.heuristicName || entry?.heuristic_name || entry?.name);
+        if (!selector || !heuristicName || seen.has(selector)) return null;
+        if (requested.size && !requested.has(selector)) return null;
+        seen.add(selector);
+        const confidence = ['high', 'medium', 'low'].includes(String(entry?.confidence || '').toLowerCase())
+            ? String(entry.confidence).toLowerCase()
+            : 'low';
+        return {
+            selector,
+            heuristicName,
+            confidence,
+            reasoning: String(entry?.reasoning || entry?.reason || '').trim().slice(0, 500),
+        };
+    }).filter(Boolean).slice(0, 80);
+}
+
+function assessSelectorNameQuality(names, context = null) {
+    const requestedCount = Array.isArray(context?.unknownSelectors) ? context.unknownSelectors.length : 0;
+    const selectorContexts = unknownSelectorContextBySelector(context);
+    const nameCounts = new Map();
+    const generic = [];
+    const invalidSemantics = [];
+    for (const entry of names || []) {
+        const key = String(entry?.heuristicName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (!key) continue;
+        nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+        if (GENERIC_HEURISTIC_NAMES.has(key)) generic.push(entry.heuristicName);
+        const semanticReason = assessSelectorNameSemantics(entry, selectorContexts.get(entry.selector));
+        if (semanticReason) invalidSemantics.push({
+            selector: entry.selector,
+            heuristicName: entry.heuristicName,
+            reason: semanticReason,
+        });
+    }
+    const duplicates = [...nameCounts.entries()]
+        .filter(([, count]) => count > 1)
+        .map(([name, count]) => ({ name, count }));
+    const tooSparse = requestedCount > 0 && names.length < Math.min(requestedCount, 8);
+    return {
+        ok: duplicates.length === 0 && generic.length === 0 && invalidSemantics.length === 0 && !tooSparse,
+        duplicates,
+        generic: [...new Set(generic)],
+        invalidSemantics,
+        tooSparse,
+    };
+}
+
+function makeSelectorNamesUnique(names) {
+    const counts = new Map();
+    return (names || []).map(entry => {
+        const key = String(entry?.heuristicName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const count = counts.get(key) || 0;
+        counts.set(key, count + 1);
+        if (!key || count === 0) return entry;
+        const suffix = String(entry.selector || '').replace(/^0x/i, '').slice(0, 4).toUpperCase();
+        return {
+            ...entry,
+            heuristicName: normalizeHeuristicName(`${entry.heuristicName}${suffix}`) || entry.heuristicName,
+            reasoning: entry.reasoning
+                ? `${entry.reasoning} Distinct selector suffix added because the model repeated a heuristic name.`
+                : 'Distinct selector suffix added because the model repeated a heuristic name.',
+        };
+    });
+}
+
 function decodeBase64Bytes(value) {
     const binary = atob(value);
     const bytes = new Uint8Array(binary.length);
@@ -876,6 +1069,52 @@ function buildCodexSummaryRequestBody(context, { fastMode = false, reasoningEffo
     return body;
 }
 
+function buildCodexSelectorNamesRequestBody(context, { fastMode = false, reasoningEffort = 'low', retryFeedback = '' } = {}) {
+    const body = {
+        model: CODEX_MODEL,
+        store: false,
+        stream: true,
+        instructions: SELECTOR_NAME_SYSTEM_PROMPT,
+        input: [
+            {
+                role: 'user',
+                content: [
+                    {
+                        type: 'input_text',
+                        text: [
+                            'Based on this bytecode, help the UI understand what these unknown function signatures could be used for. Create a simple heuristic function name for each selector that gives better context for how it is used in this contract.',
+                            'Return only this JSON shape: {"names":[{"selector":"0x12345678","heuristicName":"shortCamelCaseName","confidence":"high|medium|low","reasoning":"brief bytecode/selector evidence"}]}.',
+                            'Rules:',
+                            '- Do not include parameters in heuristicName.',
+                            '- Treat context.knownFunctionTable and context.knownFunctionNames as high-priority vocabulary for the contract domain. Use those declared/resolved names to infer whether unknown selectors are launch, tax, fee, hook, treasury, migration, pool, token, owner/admin, wallet, or phase related.',
+                            '- Keep mutability honest: pure/view functions are reads or computations, not updates. A pure no-arg selector should almost always be named as a specific constant, such as constantMaxLaunchWindow or constantBaseFeeBps.',
+                            '- Every selector must get a distinct heuristicName unless the bytecode clearly routes two selectors to the exact same handler; if so use an Alias suffix, such as constantSwapFeeShareAlias.',
+                            '- Avoid generic placeholders: readConstant, readStoredValue, readAddressValue, readIndexedConfig, readObservation, readConfigTuple, readFlag, computeScaledValue, unknownAction.',
+                            '- For pure no-arg functions, infer the specific constant purpose where possible, for example constantMaxTaxBps, constantDecayDuration, constantHookFlagMask, constantCooldownBlocks.',
+                            '- For view no-arg functions, infer the storage/config purpose where possible, for example launchConfig, tokenAddress, treasuryAddress, launchStartBlock, totalCollectedFees.',
+                            '- For address and uint256 parameters, name the mapping/calculation purpose, for example userLastTradeBlock, addressFeeDebt, feeTierAt, taxAtElapsed, buyPhaseAt, sellPhaseAt.',
+                            '- Use domain nouns from bytecode evidence and neighboring selectors: launch, fee, tax, hook, treasury, migration, block, phase, cooldown, liquidity, wallet, token, config.',
+                            '- Do not output names for selectors not listed in unknownSelectors.',
+                            '- Do not claim the names are verified or declared source names.',
+                            '- Prefer low confidence when evidence is mostly selector shape, mutability, or neighboring functions.',
+                            retryFeedback ? `Previous output was rejected: ${retryFeedback}` : '',
+                            `Context JSON:\n${JSON.stringify(context)}`,
+                        ].filter(Boolean).join('\n')
+                    }
+                ]
+            }
+        ],
+        reasoning: { effort: normalizeCodexReasoningEffort(reasoningEffort) },
+        text: { verbosity: 'low' },
+    };
+
+    if (fastMode) {
+        body.service_tier = 'priority';
+    }
+
+    return body;
+}
+
 function buildCodexChatRequestBody({ question, context, history, fastMode = false, reasoningEffort = 'low' } = {}) {
     const body = {
         model: CODEX_MODEL,
@@ -1131,12 +1370,22 @@ async function handleCodexSummary(message, sendResponse) {
         return;
     }
 
+    const dedupeKey = getDedupeKey(message);
+
     try {
-        const credentials = await getValidCodexCredentials();
-        sendResponse(await fetchCodexSummary(credentials, context, {
-            fastMode: !!message?.fastMode,
-            reasoningEffort: normalizeCodexReasoningEffort(message?.reasoningEffort),
-        }));
+        const summaryPromise = getBackgroundDedupePromise(
+            codexSummaryInFlight,
+            codexSummaryRecentResults,
+            dedupeKey,
+            async () => {
+                const credentials = await getValidCodexCredentials();
+                return fetchCodexSummary(credentials, context, {
+                    fastMode: !!message?.fastMode,
+                    reasoningEffort: normalizeCodexReasoningEffort(message?.reasoningEffort),
+                });
+            }
+        );
+        sendResponse(await summaryPromise);
     } catch (error) {
         sendResponse({ ok: false, error: error?.message || String(error) });
     }
@@ -1155,27 +1404,184 @@ async function handleOpenRouterSummary(message, sendResponse) {
         return;
     }
 
-    const dedupeKey = typeof message?.dedupeKey === 'string' ? message.dedupeKey.slice(0, 500) : '';
+    const dedupeKey = getDedupeKey(message);
 
     try {
-        let summaryPromise = dedupeKey ? openRouterSummaryInFlight.get(dedupeKey) : null;
-        if (!summaryPromise) {
-            summaryPromise = fetchOpenRouterSummary(apiKey, context);
-            if (dedupeKey) {
-                openRouterSummaryInFlight.set(dedupeKey, summaryPromise);
-                summaryPromise.then(
-                    () => openRouterSummaryInFlight.delete(dedupeKey),
-                    () => openRouterSummaryInFlight.delete(dedupeKey)
-                );
-            }
-        }
-
+        const summaryPromise = getBackgroundDedupePromise(
+            openRouterSummaryInFlight,
+            openRouterSummaryRecentResults,
+            dedupeKey,
+            () => fetchOpenRouterSummary(apiKey, context)
+        );
         sendResponse(await summaryPromise);
     } catch (error) {
         const message = error?.name === 'AbortError'
             ? `OpenRouter summary timed out after ${OPENROUTER_TIMEOUT_MS / 1000}s`
             : error?.message || String(error);
         sendResponse({ ok: false, error: message });
+    }
+}
+
+async function fetchCodexSelectorNames(credentials, context, { fastMode = false, reasoningEffort = 'low' } = {}) {
+    const startedAt = Date.now();
+    const contextBytes = new TextEncoder().encode(JSON.stringify(context || {})).byteLength;
+    const attempts = [
+        { retryFeedback: '' },
+        { retryFeedback: 'Names were too generic or duplicated. Produce selector-specific, distinct names using bytecode/storage/constant evidence. Do not use readConstant/readStoredValue/readAddressValue/readIndexedConfig-style placeholders.' },
+    ];
+    let lastQuality = null;
+    let lastNames = [];
+    let lastTiming = null;
+
+    for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), CODEX_TIMEOUT_MS);
+        const body = JSON.stringify(buildCodexSelectorNamesRequestBody(context, {
+            fastMode,
+            reasoningEffort,
+            retryFeedback: attempts[attempt].retryFeedback,
+        }));
+        const requestBodyBytes = new TextEncoder().encode(body).byteLength;
+
+        try {
+            const response = await fetch(CODEX_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${credentials.access}`,
+                    'chatgpt-account-id': credentials.accountId,
+                    'originator': 'evmole',
+                    'OpenAI-Beta': 'responses=experimental',
+                    'accept': 'text/event-stream',
+                    'content-type': 'application/json',
+                },
+                signal: controller.signal,
+                body,
+            });
+            const responseHeadersMs = Date.now() - startedAt;
+            const responseHeaderDiagnostics = {
+                requestId: response.headers.get('x-request-id') || response.headers.get('openai-request-id') || '',
+                cfRay: response.headers.get('cf-ray') || '',
+                contentType: response.headers.get('content-type') || '',
+                serverTiming: response.headers.get('server-timing') || '',
+            };
+
+            if (!response.ok) {
+                const errorText = await response.text().catch(() => '');
+                throw new Error(`Codex selector naming failed with HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 240)}` : ''}`);
+            }
+
+            const { text: contentText, timing: sseTiming } = await readCodexSseText(response, controller.signal, { startedAt });
+            console.log('Codex selector names raw content:', contentText);
+            const jsonText = extractJsonText(contentText);
+            if (!jsonText) {
+                throw new Error(`Codex returned empty selector-name output: ${summarizeRawOutputForError(contentText) || 'empty output'}`);
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(jsonText);
+            } catch (error) {
+                throw new Error(`Codex returned malformed selector-name JSON: ${summarizeRawOutputForError(contentText) || error?.message || 'parse failed'}`);
+            }
+
+            const names = normalizeSelectorNamePayload(parsed, context);
+            const quality = assessSelectorNameQuality(names, context);
+            lastNames = names;
+            lastQuality = quality;
+            lastTiming = {
+                totalMs: Date.now() - startedAt,
+                requestBodyBytes,
+                contextBytes,
+                responseHeadersMs,
+                responseHeaders: responseHeaderDiagnostics,
+                outputChars: contentText.length,
+                fastMode: !!fastMode,
+                reasoningEffort: normalizeCodexReasoningEffort(reasoningEffort),
+                attempt: attempt + 1,
+                quality,
+                ...sseTiming,
+            };
+
+            if (quality.ok || attempt === attempts.length - 1) break;
+            attempts[attempt + 1].retryFeedback = [
+                attempts[attempt + 1].retryFeedback,
+                quality.invalidSemantics?.length
+                    ? `Invalid mutability/name matches: ${quality.invalidSemantics.map(item => `${item.selector} ${item.heuristicName} (${item.reason})`).join('; ')}.`
+                    : '',
+                quality.duplicates?.length
+                    ? `Duplicate names: ${quality.duplicates.map(item => `${item.name} x${item.count}`).join(', ')}.`
+                    : '',
+                quality.generic?.length
+                    ? `Generic names: ${quality.generic.join(', ')}.`
+                    : '',
+            ].filter(Boolean).join(' ');
+            console.warn('Codex selector names rejected for quality, retrying:', quality);
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                throw new Error(`Codex selector naming timed out after ${CODEX_TIMEOUT_MS / 1000}s`);
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    try {
+        const selectorContexts = unknownSelectorContextBySelector(context);
+        const acceptedNames = makeSelectorNamesUnique((lastNames || []).filter(entry => {
+            const key = String(entry?.heuristicName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            return key
+                && !GENERIC_HEURISTIC_NAMES.has(key)
+                && !assessSelectorNameSemantics(entry, selectorContexts.get(entry.selector));
+        }));
+        const timing = {
+            totalMs: Date.now() - startedAt,
+            contextBytes,
+            fastMode: !!fastMode,
+            reasoningEffort: normalizeCodexReasoningEffort(reasoningEffort),
+            finalQuality: lastQuality,
+            ...(lastTiming || {}),
+        };
+        console.info('Codex selector naming timing:', timing);
+
+        return {
+            ok: true,
+            model: fastMode ? CODEX_PRIORITY_MODEL_LABEL : CODEX_MODEL,
+            promptVersion: SELECTOR_NAME_PROMPT_VERSION,
+            names: acceptedNames,
+            usage: null,
+            timing,
+        };
+    } catch (error) {
+        throw error;
+    }
+}
+
+async function handleCodexSelectorNames(message, sendResponse) {
+    const context = message?.context;
+    if (!context || typeof context !== 'object') {
+        sendResponse({ ok: false, error: 'Missing selector naming context.' });
+        return;
+    }
+
+    const dedupeKey = getDedupeKey(message);
+
+    try {
+        const selectorNamesPromise = getBackgroundDedupePromise(
+            selectorNamesInFlight,
+            selectorNamesRecentResults,
+            dedupeKey,
+            async () => {
+                const credentials = await getValidCodexCredentials();
+                return fetchCodexSelectorNames(credentials, context, {
+                    fastMode: !!message?.fastMode,
+                    reasoningEffort: normalizeCodexReasoningEffort(message?.reasoningEffort),
+                });
+            }
+        );
+        sendResponse(await selectorNamesPromise);
+    } catch (error) {
+        sendResponse({ ok: false, error: error?.message || String(error) });
     }
 }
 
@@ -1400,6 +1806,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message?.type === CODEX_SUMMARY_TYPE) {
         handleCodexSummary(message, sendResponse);
+        return true;
+    }
+
+    if (message?.type === CODEX_SELECTOR_NAMES_TYPE) {
+        handleCodexSelectorNames(message, sendResponse);
         return true;
     }
 

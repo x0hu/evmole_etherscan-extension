@@ -30,12 +30,14 @@ function escapeHtml(str) {
   const OPENROUTER_STATUS_TYPE = 'EVMOLE_OPENROUTER_STATUS';
   const OPENROUTER_CHAT_TYPE = 'EVMOLE_OPENROUTER_CHAT';
   const CODEX_SUMMARY_TYPE = 'EVMOLE_CODEX_SUMMARY';
+  const CODEX_SELECTOR_NAMES_TYPE = 'EVMOLE_CODEX_SELECTOR_NAMES';
   const CODEX_CHAT_TYPE = 'EVMOLE_CODEX_CHAT';
   const CODEX_STATUS_TYPE = 'EVMOLE_CODEX_STATUS';
   const FETCH_TOKEN_URI_TYPE = 'EVMOLE_FETCH_TOKEN_URI';
   const CALL_CONTRACT_FUNCTION_TYPE = 'CALL_CONTRACT_FUNCTION';
   const CALL_CONTRACT_FUNCTION_RESULT_TYPE = 'CALL_CONTRACT_FUNCTION_RESULT';
   const SUMMARY_PROMPT_VERSION = 'evmole-contract-summary-v19-token-limit-facts';
+  const SELECTOR_NAME_PROMPT_VERSION = 'evmole-selector-heuristic-v3';
   const SUMMARY_MODEL = 'deepseek/deepseek-v4-flash';
   const CODEX_SUMMARY_MODEL = 'gpt-5.5';
   const CODEX_SUMMARY_PRIORITY_MODEL = 'gpt-5.5:priority';
@@ -43,6 +45,7 @@ function escapeHtml(str) {
   const SUMMARY_READ_PURPOSE = 'SUMMARY_CONTEXT';
   const CHAT_TOOL_READ_PURPOSE = 'CHAT_TOOL_READ';
   const SUMMARY_MIN_AUTO_READ_LIMIT = 10;
+  const SELECTOR_NAME_BYTECODE_CHAR_LIMIT = 120000;
   const SUMMARY_MAX_AUTO_READ_LIMIT = 20;
   const SUMMARY_RELOAD_READ_LIMIT = 35;
   const SUMMARY_AUTO_READ_TIMEOUT_MS = 3000;
@@ -864,6 +867,104 @@ function escapeHtml(str) {
     }
   }
 
+  function getSelectorNameCacheModel(settings) {
+    return settings?.codexFastMode ? CODEX_SUMMARY_PRIORITY_MODEL : CODEX_SUMMARY_MODEL;
+  }
+
+  function normalizeHeuristicName(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const cleaned = raw
+      .replace(/\([^)]*\)/g, '')
+      .replace(/[^A-Za-z0-9_]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80);
+    if (!cleaned) return '';
+    const withPrefix = /^[A-Za-z_]/.test(cleaned) ? cleaned : `fn_${cleaned}`;
+    return /^[A-Za-z_][A-Za-z0-9_]{1,79}$/.test(withPrefix) ? withPrefix : '';
+  }
+
+  function normalizeSelectorCacheId(value) {
+    const text = String(value || '').trim().toLowerCase();
+    if (!text) return '';
+    const selector = text.startsWith('0x') ? text : `0x${text}`;
+    return /^0x[0-9a-f]{8}$/.test(selector) ? selector : '';
+  }
+
+  function normalizeAiSelectorNameEntry(entry) {
+    const selector = normalizeSelectorCacheId(entry?.selector);
+    const heuristicName = normalizeHeuristicName(entry?.heuristicName || entry?.heuristic_name || entry?.name);
+    if (!selector || !heuristicName) return null;
+    const confidence = ['high', 'medium', 'low'].includes(String(entry?.confidence || '').toLowerCase())
+      ? String(entry.confidence).toLowerCase()
+      : 'low';
+    return {
+      selector,
+      heuristicName,
+      confidence,
+      reasoning: String(entry?.reasoning || '').trim().slice(0, 500),
+      source: 'codex'
+    };
+  }
+
+  async function fetchAiSelectorNameCache(settings, params) {
+    const baseUrl = getSignatureDatabaseBaseUrl(settings);
+    if (!baseUrl || !params?.bytecodeHash || !params?.contractAddress) return new Map();
+
+    const url = new URL(`${baseUrl}/ai-selector-names`);
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        url.searchParams.set(key, Array.isArray(value) ? value.join(',') : String(value));
+      }
+    });
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3500);
+    try {
+      const response = await fetch(url, {
+        headers: { 'Accept': 'application/json' },
+        signal: controller.signal
+      });
+      if (!response.ok) return new Map();
+      const payload = await response.json();
+      const entries = Array.isArray(payload?.names) ? payload.names : [];
+      return entries.reduce((acc, entry) => {
+        const normalized = normalizeAiSelectorNameEntry(entry);
+        if (normalized) acc.set(normalized.selector, normalized);
+        return acc;
+      }, new Map());
+    } catch (e) {
+      console.log('AI selector name cache lookup error:', e?.message || e);
+      return new Map();
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function storeAiSelectorNameCache(settings, params, names) {
+    const baseUrl = getSignatureDatabaseBaseUrl(settings);
+    const normalizedNames = (names || []).map(normalizeAiSelectorNameEntry).filter(Boolean);
+    if (!baseUrl || !params?.bytecodeHash || !params?.contractAddress || normalizedNames.length === 0) return;
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 3500);
+    try {
+      await fetch(`${baseUrl}/ai-selector-names`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          ...params,
+          names: normalizedNames
+        })
+      });
+    } catch (e) {
+      console.log('AI selector name cache store error:', e?.message || e);
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
   async function fetchContractSummariesByCreator(settings, { chainHost, creatorAddress, excludeContractAddress, limit = 10 }) {
     const baseUrl = getSignatureDatabaseBaseUrl(settings);
     if (!baseUrl || !creatorAddress) return [];
@@ -1540,13 +1641,19 @@ function escapeHtml(str) {
     function buildCallableFunctionRegistry(selectorRecords, verifiedFunctions) {
       const verifiedMaps = buildVerifiedFunctionMaps(verifiedFunctions || []);
       return (selectorRecords || []).map(record => {
-        const signature = String(record?.signature || '').trim();
+        const actualSignature = String(record?.signature || '').trim();
+        const heuristicName = normalizeHeuristicName(record?.heuristicName || '');
+        const rawInputTypes = splitTopLevelAbiTypes(record.args || '');
+        const signature = actualSignature && actualSignature !== 'Unknown'
+          ? actualSignature
+          : (heuristicName ? `${heuristicName}(${rawInputTypes.join(',')})` : actualSignature);
         const name = functionNameFromSignature(signature);
         if (!signature || signature === 'Unknown' || !name) return null;
 
-        const rawInputTypes = splitTopLevelAbiTypes(record.args || '');
-        const verified = verifiedMaps.bySignature.get(signature)
-          || verifiedMaps.byNameAndInputs.get(`${name.toLowerCase()}(${rawInputTypes.join(',')})`);
+        const verified = actualSignature && actualSignature !== 'Unknown'
+          ? (verifiedMaps.bySignature.get(actualSignature)
+            || verifiedMaps.byNameAndInputs.get(`${name.toLowerCase()}(${rawInputTypes.join(',')})`))
+          : null;
         const inputTypes = (verified?.inputTypes?.length ? verified.inputTypes : rawInputTypes)
           .map(normalizeAbiType);
         if (inputTypes.some(type => !type)) return null;
@@ -1803,7 +1910,9 @@ function escapeHtml(str) {
         .filter(item => {
           const selector = item.dataset.selector;
           const signature = item.dataset.signature;
-          return selector && signature && !linkScanRequestedSelectors.has(selector);
+          return selector
+            && signature
+            && !linkScanRequestedSelectors.has(selector);
         })
         .sort((a, b) => Number(isLikelyLinkReadFunction(b.dataset.signature)) - Number(isLikelyLinkReadFunction(a.dataset.signature)));
 
@@ -2564,6 +2673,9 @@ function escapeHtml(str) {
         args: record.args || '',
         isRead: !!record.isRead,
         isUnknown: !!record.isUnknown,
+        heuristicName: record.heuristicName || '',
+        heuristicSource: record.heuristicSource || '',
+        heuristicConfidence: record.heuristicConfidence || '',
         rankScore: Number.isFinite(record.rankScore) ? record.rankScore : undefined
       };
     }
@@ -2637,6 +2749,7 @@ function escapeHtml(str) {
       const tokenLikeSurface = [];
       const hookSurface = [];
       const unknownSelectors = [];
+      const heuristicUnknowns = [];
       const seenKnown = new Set();
       const seenControls = new Set();
       const seenToken = new Set();
@@ -2648,6 +2761,15 @@ function escapeHtml(str) {
         const name = getFunctionName(record);
         if (!signature || signature === 'Unknown') {
           if (selector) unknownSelectors.push(selector);
+          if (selector && record?.heuristicName) {
+            heuristicUnknowns.push({
+              selector,
+              heuristicName: record.heuristicName,
+              confidence: record.heuristicConfidence || 'low',
+              params: String(record?.args || '').slice(0, 120),
+              mutability: String(record?.mutability || '').slice(0, 20)
+            });
+          }
           continue;
         }
 
@@ -2689,6 +2811,7 @@ function escapeHtml(str) {
         tokenLikeSurface: tokenLikeSurface.slice(0, 16),
         hookSurface: hookSurface.slice(0, 16),
         unknownSelectors: [...new Set(unknownSelectors)].slice(0, 10),
+        heuristicUnknowns: heuristicUnknowns.slice(0, 10),
         interpretationHints: Array.isArray(context.implementationDifferences?.interpretedUsecase)
           ? context.implementationDifferences.interpretedUsecase.slice(0, 8)
           : [],
@@ -3461,7 +3584,7 @@ function escapeHtml(str) {
       autoSummaryAttempted = true;
       try {
         if (getSummaryProvider() === 'codex') {
-          if (!await hasCodexLogin() && !await hasOpenRouterApiKey()) return;
+          if (!await hasCodexLogin()) return;
         } else if (!await hasOpenRouterApiKey()) {
           return;
         }
@@ -3582,24 +3705,6 @@ function escapeHtml(str) {
             reasoningEffort: 'low',
             dedupeKey: stableStringify(cacheParams)
           });
-          if (!response?.ok && await hasOpenRouterApiKey()) {
-            const codexError = String(response?.error || 'unknown error');
-            console.warn('Codex summary failed, falling back to OpenRouter:', codexError, response);
-            providerUsed = 'openrouter';
-            cacheParams = {
-              ...cacheParams,
-              model: SUMMARY_MODEL
-            };
-            setSummaryState(summaryPanel, 'loading', {
-              message: `Codex failed: ${codexError.slice(0, 90)}. Asking OpenRouter...`,
-              summary: visibleFallbackSummary
-            });
-            response = await chromeMessage({
-              type: OPENROUTER_SUMMARY_TYPE,
-              context: modelContext,
-              dedupeKey: stableStringify(cacheParams)
-            });
-          }
         } else {
           response = await chromeMessage({
             type: OPENROUTER_SUMMARY_TYPE,
@@ -3945,18 +4050,6 @@ function escapeHtml(str) {
             fastMode: !!settings.codexFastMode,
             reasoningEffort: 'low'
           });
-          if (!response?.ok && await hasOpenRouterApiKey()) {
-            const codexError = String(response?.error || 'unknown error');
-            console.warn('Codex chat failed, falling back to OpenRouter:', codexError, response);
-            providerUsed = 'openrouter';
-            loadingItem.innerHTML = renderChatText(`Codex failed: ${codexError.slice(0, 90)}. Asking OpenRouter...`);
-            response = await chromeMessage({
-              type: OPENROUTER_CHAT_TYPE,
-              question: trimmed,
-              context,
-              history: chatHistory.slice(0, -1)
-            });
-          }
         } else {
           loadingItem.innerHTML = renderChatText('Asking OpenRouter...');
           response = await chromeMessage({
@@ -4056,6 +4149,170 @@ function escapeHtml(str) {
 
     attachSummaryControls();
 
+    function compactSelectorNameBytecode(bytecode) {
+      const value = String(bytecode || '');
+      if (!value || value.length <= SELECTOR_NAME_BYTECODE_CHAR_LIMIT) {
+        return {
+          bytecode: value,
+          truncated: false,
+          originalChars: value.length
+        };
+      }
+      const keep = Math.floor((SELECTOR_NAME_BYTECODE_CHAR_LIMIT - 80) / 2);
+      return {
+        bytecodeHead: value.slice(0, keep),
+        bytecodeTail: value.slice(-keep),
+        truncated: true,
+        originalChars: value.length
+      };
+    }
+
+    function buildSelectorNameContext(selectorRecords, eventData, cacheParams) {
+      const unknownSelectors = (selectorRecords || [])
+        .filter(record => record?.isUnknown && !record.heuristicName)
+        .map(record => ({
+          selector: normalizeSelectorId(record.selector),
+          args: record.args || '',
+          mutability: record.mutability || '',
+          inputTypes: record.inputTypes || [],
+          isRead: !!record.isRead
+        }))
+        .slice(0, 80);
+
+      const knownFunctions = (selectorRecords || [])
+        .filter(record => !record?.isUnknown)
+        .map(record => ({
+          selector: normalizeSelectorId(record.selector),
+          signature: record.signature,
+          args: record.args || '',
+          mutability: record.mutability || '',
+          isRead: !!record.isRead
+        }))
+        .slice(0, 80);
+      const knownFunctionTable = knownFunctions
+        .map(record => `${record.selector} ${record.args || '()'} ${record.mutability || ''} ${record.signature}`)
+        .join('\n');
+      const knownFunctionNames = [...new Set(knownFunctions
+        .map(record => String(record.signature || '').split('(')[0])
+        .filter(Boolean))]
+        .slice(0, 80);
+
+      return {
+        promptVersion: SELECTOR_NAME_PROMPT_VERSION,
+        chainHost: window.location.hostname,
+        pageUrl: window.location.href,
+        contractAddress,
+        implementationAddress: eventData.implementationAddress || null,
+        implementationPath: Array.isArray(eventData.implementationPath) ? eventData.implementationPath : [],
+        bytecodeSource: eventData.bytecodeSource || null,
+        bytecodeHash: cacheParams.bytecodeHash,
+        bytecode: compactSelectorNameBytecode(eventData.analyzedBytecode),
+        unknownSelectors,
+        unknownSelectorTable: unknownSelectors
+          .map(record => `${record.selector} ${record.args || '()'} ${record.mutability || ''} Unknown`)
+          .join('\n'),
+        knownFunctions,
+        knownFunctionNames,
+        knownFunctionTable,
+        note: 'Heuristic names are provisional UI labels for selectors whose real ABI signature is unknown.'
+      };
+    }
+
+    function applyAiSelectorNames(selectorRecords, names) {
+      const normalized = new Map((names || [])
+        .map(normalizeAiSelectorNameEntry)
+        .filter(Boolean)
+        .map(entry => [entry.selector, entry]));
+      if (normalized.size === 0) return [];
+
+      const applied = [];
+      (selectorRecords || []).forEach(record => {
+        if (!record?.isUnknown) return;
+        const entry = normalized.get(normalizeSelectorId(record.selector));
+        if (!entry) return;
+        record.heuristicName = entry.heuristicName;
+        record.heuristicSource = 'codex';
+        record.heuristicConfidence = entry.confidence;
+        record.heuristicReasoning = entry.reasoning;
+        applied.push(entry);
+
+        const item = panel.querySelector(`.selector-item[data-selector="${CSS.escape(normalizeSelectorId(record.selector))}"]`);
+        if (!item) return;
+        const displayName = `${entry.heuristicName}${record.args || '()'}`;
+	        item.classList.remove('highlight-ai-pending');
+	        item.classList.add('highlight-ai-heuristic');
+	        item.dataset.heuristicName = entry.heuristicName;
+	        item.dataset.heuristicConfidence = entry.confidence;
+	        item.dataset.heuristicSource = 'codex';
+	        item.dataset.querySignature = displayName;
+	        const functionNameEl = item.querySelector('.function-name');
+        if (functionNameEl) {
+          functionNameEl.dataset.full = displayName;
+          functionNameEl.textContent = panel.parentNode?.querySelector('.evmole-panel.collapsed')
+            ? `${entry.heuristicName}()`
+            : displayName;
+        }
+        const functionInfo = item.querySelector('.function-info');
+        functionInfo?.querySelectorAll('.ai-heuristic-indicator').forEach(badge => badge.remove());
+        if (functionInfo) {
+          const badge = document.createElement('span');
+          badge.className = 'ai-heuristic-indicator';
+          badge.textContent = 'AI';
+          badge.title = entry.reasoning
+            ? `AI heuristic (${entry.confidence} confidence): ${entry.reasoning}`
+            : `AI heuristic (${entry.confidence} confidence)`;
+          functionInfo.appendChild(badge);
+        }
+	      });
+	
+	      if (applied.length > 0) {
+	        latestCallableFunctionRegistry = buildCallableFunctionRegistry(selectorRecords, latestSummaryContextBase?.verifiedAbi || []);
+	      }
+
+	      return applied;
+	    }
+
+    function clearAiPendingState(selectorRecords) {
+      (selectorRecords || []).forEach(record => {
+        if (!record?.isUnknown || record.heuristicName) return;
+        const item = panel.querySelector(`.selector-item[data-selector="${CSS.escape(normalizeSelectorId(record.selector))}"]`);
+        item?.classList.remove('highlight-ai-pending');
+        item?.querySelector('.ai-heuristic-indicator.pending')?.remove();
+      });
+    }
+
+    async function requestAiSelectorNames(selectorRecords, eventData, cacheParams) {
+      const unknownRecords = (selectorRecords || []).filter(record => record?.isUnknown && !record.heuristicName);
+      if (unknownRecords.length === 0 || !cacheParams?.bytecodeHash || !eventData?.analyzedBytecode) return;
+      if (!await hasCodexLogin()) {
+        clearAiPendingState(selectorRecords);
+        return;
+      }
+
+      const response = await chromeMessage({
+        type: CODEX_SELECTOR_NAMES_TYPE,
+        context: buildSelectorNameContext(selectorRecords, eventData, cacheParams),
+        fastMode: !!settings.codexFastMode,
+        reasoningEffort: 'low',
+        dedupeKey: stableStringify(cacheParams)
+      });
+      if (!response?.ok) {
+        console.log('Codex selector naming failed:', response?.error || response);
+        clearAiPendingState(selectorRecords);
+        return;
+      }
+
+      const applied = applyAiSelectorNames(selectorRecords, response.names || []);
+      if (applied.length > 0) {
+        await storeAiSelectorNameCache(settings, {
+          ...cacheParams,
+          model: response.model || cacheParams.model,
+          promptVersion: response.promptVersion || cacheParams.promptVersion
+        }, applied);
+      }
+      clearAiPendingState(selectorRecords);
+    }
+
     const messageHandler = async function(event) {
       if (event.data && event.data.type === 'FUNCTION_SELECTORS_RESULT') {
         if (event.data.selectors && Array.isArray(event.data.selectors) && event.data.selectors.length > 0) {
@@ -4067,6 +4324,32 @@ function escapeHtml(str) {
             ? verifiedAbi.filter(entry => entry?.type === 'function').slice(0, 200)
             : [];
           const verifiedFunctionMaps = buildVerifiedFunctionMaps(verifiedFunctions);
+          const verifiedFunctionRecords = [...verifiedFunctionMaps.bySignature.values()];
+          const parsedSelectors = event.data.selectors.map(parseSelectorDetail).filter(Boolean);
+          const aiCacheParams = {
+            chainHost: window.location.hostname,
+            contractAddress,
+            implementationAddress: event.data.implementationAddress || '',
+            bytecodeHash: String(event.data.analyzedBytecodeHash || '').trim().toLowerCase(),
+            model: getSelectorNameCacheModel(settings),
+            promptVersion: SELECTOR_NAME_PROMPT_VERSION,
+            selectors: parsedSelectors.filter(record => record.isUnknown).map(record => normalizeSelectorId(record.selector))
+          };
+          const cachedAiNames = verifiedFunctions.length === 0 && aiCacheParams.selectors.length > 0
+            ? await fetchAiSelectorNameCache(settings, aiCacheParams)
+            : new Map();
+
+          const findVerifiedFunctionForUnknown = (rawParamTypes, mutability) => {
+            const normalizedRawTypes = rawParamTypes.map(normalizeAbiType);
+            const matches = verifiedFunctionRecords.filter(record => {
+              const verifiedTypes = (record.inputTypes || []).map(normalizeAbiType);
+              if (verifiedTypes.length !== normalizedRawTypes.length) return false;
+              if (!verifiedTypes.every((type, index) => type === normalizedRawTypes[index])) return false;
+              const verifiedMutability = String(record.stateMutability || '').toLowerCase();
+              return !verifiedMutability || !mutability || verifiedMutability === String(mutability).toLowerCase();
+            });
+            return matches.length === 1 ? matches[0] : null;
+          };
 
           const compareFunctionDisplayItems = (a, b) => {
             const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
@@ -4076,28 +4359,41 @@ function escapeHtml(str) {
             return a.selector.localeCompare(b.selector, undefined, { sensitivity: 'base' });
           };
 
-          event.data.selectors.forEach(selector => {
-            if (typeof selector !== 'string') return;
-            const [selectorInfo, signatureInfo] = selector.split('\n');
-            if (!selectorInfo || !signatureInfo) return;
-            const [selectorId, argsAndMutability] = selectorInfo.split(': ');
-            if (!selectorId || !argsAndMutability) return;
-            const [args, mutability] = argsAndMutability.split(' ');
-            const functionName = signatureInfo.trim();
+          parsedSelectors.forEach(parsedSelector => {
+            const selectorId = normalizeSelectorId(parsedSelector.selector);
+            const { args, mutability } = parsedSelector;
+            let functionName = parsedSelector.signature;
             const rawParamTypes = splitTopLevelAbiTypes(args);
-            const verifiedFunction = verifiedFunctionMaps.bySignature.get(functionName)
+            let verifiedFunction = verifiedFunctionMaps.bySignature.get(functionName)
               || verifiedFunctionMaps.byNameAndInputs.get(`${functionName.split('(')[0].toLowerCase()}(${rawParamTypes.join(',')})`);
+            if ((!functionName || functionName === 'Unknown') && verifiedFunctions.length > 0) {
+              verifiedFunction = findVerifiedFunctionForUnknown(rawParamTypes, mutability);
+              if (verifiedFunction?.signature) functionName = verifiedFunction.signature;
+            }
             const effectiveMutability = verifiedFunction?.stateMutability || mutability;
+            const isRealUnknown = functionName === 'Unknown';
+            const aiName = isRealUnknown ? cachedAiNames.get(selectorId) : null;
+            const displayName = aiName ? `${aiName.heuristicName}${args || '()'}` : functionName;
+            const aiBadge = aiName
+              ? `<span class="ai-heuristic-indicator" title="${escapeHtml(aiName.reasoning ? `AI heuristic (${aiName.confidence} confidence): ${aiName.reasoning}` : `AI heuristic (${aiName.confidence} confidence)`)}">AI</span>`
+              : (isRealUnknown && verifiedFunctions.length === 0 && aiCacheParams.bytecodeHash && event.data.analyzedBytecode
+                ? '<span class="ai-heuristic-indicator pending" title="Waiting for Codex heuristic naming">AI pending</span>'
+                : '');
 
             const isNonStandard = !standardFunctionSignatures.includes(functionName) &&
                                   !standardFunctionSelectors.has(selectorId.toLowerCase());
-            const highlightClass = isNonStandard ? 'highlight-non-standard' : '';
+            const highlightClass = [
+              isNonStandard ? 'highlight-non-standard' : '',
+              aiName ? 'highlight-ai-heuristic' : '',
+              (!aiName && isRealUnknown && verifiedFunctions.length === 0 && aiCacheParams.bytecodeHash && event.data.analyzedBytecode) ? 'highlight-ai-pending' : ''
+            ].filter(Boolean).join(' ');
 
             const isReadFunction = effectiveMutability === 'view' || effectiveMutability === 'pure';
             const normalizedParamTypes = (verifiedFunction?.inputTypes?.length ? verifiedFunction.inputTypes : rawParamTypes).map(normalizeAbiType);
             const hasParseableParams = normalizedParamTypes.length > 0 && normalizedParamTypes.every(Boolean);
-            const isNoArgRead = isReadFunction && args === '()' && functionName !== 'Unknown';
-            const isParameterizedRead = isReadFunction && hasParseableParams && functionName !== 'Unknown';
+	            const canQueryUnknownRead = isRealUnknown && isReadFunction && (aiName || aiCacheParams.bytecodeHash || normalizedParamTypes.length > 0);
+	            const isNoArgRead = isReadFunction && args === '()' && (!isRealUnknown || canQueryUnknownRead);
+	            const isParameterizedRead = isReadFunction && hasParseableParams && (!isRealUnknown || canQueryUnknownRead);
             const queryableClass = isNoArgRead
               ? 'queryable'
               : (isParameterizedRead ? 'queryable parameterized-queryable' : '');
@@ -4117,7 +4413,11 @@ function escapeHtml(str) {
             const itemHtml = `
               <div class="selector-item ${highlightClass} ${queryableClass}"
                    data-selector="${selectorId}"
-                   data-signature="${functionName}"
+	                   data-signature="${functionName}"
+	                   data-query-signature="${escapeHtml(aiName ? displayName : functionName)}"
+	                   data-heuristic-name="${escapeHtml(aiName?.heuristicName || '')}"
+                   data-heuristic-source="${aiName ? 'codex' : ''}"
+                   data-heuristic-confidence="${escapeHtml(aiName?.confidence || '')}"
                    data-queryable="${isNoArgRead || isParameterizedRead}"
                    data-param-types="${escapeHtml(JSON.stringify(normalizedParamTypes.filter(Boolean)))}">
                 <div class="selector-info">
@@ -4126,7 +4426,7 @@ function escapeHtml(str) {
                   <span class="mutability">${effectiveMutability}</span>
                 </div>
                 <div class="function-info">
-                  <span class="function-name">${functionName}</span>${queryIndicator}
+                  <span class="function-name">${escapeHtml(displayName)}</span>${aiBadge}${queryIndicator}
                 </div>
                 ${queryDropdown}
               </div>
@@ -4140,19 +4440,23 @@ function escapeHtml(str) {
               inputTypes: normalizedParamTypes.filter(Boolean),
               inputNames: verifiedFunction?.inputNames || [],
               isRead: isReadFunction,
-              isUnknown: functionName === 'Unknown'
+              isUnknown: isRealUnknown,
+              heuristicName: aiName?.heuristicName || '',
+              heuristicSource: aiName ? 'codex' : '',
+              heuristicConfidence: aiName?.confidence || '',
+              heuristicReasoning: aiName?.reasoning || ''
             });
 
             if (isReadFunction) {
               readFunctions.push({
-                name: functionName,
+                name: displayName,
                 args,
                 selector: selectorId,
                 html: itemHtml
               });
             } else {
               writeFunctions.push({
-                name: functionName,
+                name: displayName,
                 args,
                 selector: selectorId,
                 html: itemHtml
@@ -4208,6 +4512,7 @@ function escapeHtml(str) {
               implementationAddress: event.data.implementationAddress || null,
               implementationPath: Array.isArray(event.data.implementationPath) ? event.data.implementationPath : [],
               bytecodeSource: event.data.bytecodeSource || null,
+              analyzedBytecodeHash: event.data.analyzedBytecodeHash || null,
               counts: {
                 functions: selectorRecords.length,
                 read: selectorRecords.filter(record => record.isRead).length,
@@ -4238,9 +4543,9 @@ function escapeHtml(str) {
               if (queryBtn) {
                 queryBtn.addEventListener('click', (e) => {
                   e.stopPropagation();
-                  if (queryBtn.disabled) return;
-                  const selector = item.dataset.selector;
-                  const signature = item.dataset.signature;
+	                  if (queryBtn.disabled) return;
+	                  const selector = item.dataset.selector;
+	                  const signature = item.dataset.querySignature || item.dataset.signature;
                   const resultDiv = item.querySelector('.query-result');
                   const inputTypes = JSON.parse(item.dataset.paramTypes || '[]');
                   let inputValues;
@@ -4320,8 +4625,13 @@ function escapeHtml(str) {
                 el.textContent = el.textContent.replace(/\(.*\)/, '()');
               });
             }
-
             queueReadFunctionLinkScan();
+            if (verifiedFunctions.length === 0) {
+              requestAiSelectorNames(selectorRecords, event.data, aiCacheParams).catch(e => {
+                console.log('AI selector naming request error:', e?.message || e);
+                clearAiPendingState(selectorRecords);
+              });
+            }
           }
         } else if (panel && panel.parentNode) {
           const errorMsg = event.data.error || 'No function selectors found';
