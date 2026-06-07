@@ -46,6 +46,7 @@ function escapeHtml(str) {
   const CHAT_TOOL_READ_PURPOSE = 'CHAT_TOOL_READ';
   const SUMMARY_MIN_AUTO_READ_LIMIT = 10;
   const SELECTOR_NAME_BYTECODE_CHAR_LIMIT = 120000;
+  const SELECTOR_NAME_BATCH_SIZE = 40;
   const SUMMARY_MAX_AUTO_READ_LIMIT = 20;
   const SUMMARY_RELOAD_READ_LIMIT = 35;
   const SUMMARY_AUTO_READ_TIMEOUT_MS = 3000;
@@ -4171,8 +4172,9 @@ function escapeHtml(str) {
       };
     }
 
-    function buildSelectorNameContext(selectorRecords, eventData, cacheParams) {
-      const unknownSelectors = (selectorRecords || [])
+    function buildSelectorNameContext(selectorRecords, eventData, cacheParams, targetRecords = null) {
+      const recordsToName = Array.isArray(targetRecords) ? targetRecords : selectorRecords;
+      const unknownSelectors = (recordsToName || [])
         .filter(record => record?.isUnknown && !record.heuristicName)
         .map(record => ({
           selector: normalizeSelectorId(record.selector),
@@ -4181,7 +4183,7 @@ function escapeHtml(str) {
           inputTypes: record.inputTypes || [],
           isRead: !!record.isRead
         }))
-        .slice(0, 80);
+        .slice(0, SELECTOR_NAME_BATCH_SIZE);
 
       const knownFunctions = (selectorRecords || [])
         .filter(record => !record?.isUnknown)
@@ -4293,28 +4295,47 @@ function escapeHtml(str) {
         return;
       }
 
-      const response = await chromeMessage({
-        type: CODEX_SELECTOR_NAMES_TYPE,
-        context: buildSelectorNameContext(selectorRecords, eventData, cacheParams),
-        fastMode: !!settings.codexFastMode,
-        reasoningEffort: 'low',
-        dedupeKey: stableStringify(cacheParams)
-      });
-      if (!response?.ok) {
-        console.log('Codex selector naming failed:', response?.error || response);
-        clearAiPendingState(selectorRecords);
-        return;
-      }
+      for (let index = 0; index < unknownRecords.length; index += SELECTOR_NAME_BATCH_SIZE) {
+        const batchRecords = unknownRecords.slice(index, index + SELECTOR_NAME_BATCH_SIZE)
+          .filter(record => record?.isUnknown && !record.heuristicName);
+        if (batchRecords.length === 0) continue;
 
-      const applied = applyAiSelectorNames(selectorRecords, response.names || []);
-      if (applied.length > 0) {
-        await storeAiSelectorNameCache(settings, {
+        const batchSelectors = batchRecords
+          .map(record => normalizeSelectorId(record.selector))
+          .filter(Boolean);
+        const batchCacheParams = {
           ...cacheParams,
-          model: response.model || cacheParams.model,
-          promptVersion: response.promptVersion || cacheParams.promptVersion
-        }, applied);
+          selectors: batchSelectors
+        };
+        const response = await chromeMessage({
+          type: CODEX_SELECTOR_NAMES_TYPE,
+          context: buildSelectorNameContext(selectorRecords, eventData, batchCacheParams, batchRecords),
+          fastMode: !!settings.codexFastMode,
+          reasoningEffort: 'low',
+          dedupeKey: stableStringify(batchCacheParams)
+        });
+        if (!response?.ok) {
+          console.log('Codex selector naming failed:', response?.error || response, { selectors: batchSelectors });
+          clearAiPendingState(batchRecords);
+          continue;
+        }
+
+        const applied = applyAiSelectorNames(selectorRecords, response.names || []);
+        if (applied.length > 0) {
+          await storeAiSelectorNameCache(settings, {
+            ...batchCacheParams,
+            model: response.model || batchCacheParams.model,
+            promptVersion: response.promptVersion || batchCacheParams.promptVersion
+          }, applied);
+        }
+
+        const appliedSelectors = new Set(applied.map(entry => normalizeSelectorId(entry.selector)));
+        const unresolvedSelectors = batchSelectors.filter(selector => !appliedSelectors.has(selector));
+        if (unresolvedSelectors.length > 0) {
+          console.log('Codex selector naming returned no accepted heuristic for some selectors:', unresolvedSelectors);
+        }
+        clearAiPendingState(batchRecords);
       }
-      clearAiPendingState(selectorRecords);
     }
 
     const messageHandler = async function(event) {
