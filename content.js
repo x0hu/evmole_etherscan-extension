@@ -926,6 +926,7 @@ function escapeHtml(str) {
         <div>
           <div class="summary-title">Contract Summary</div>
           <div class="summary-status ${statusClass}">${escapeHtml(message || label)}</div>
+          <div class="summary-identifiers" style="display:none;"></div>
         </div>
         <div class="summary-actions">
           <button type="button" class="summary-action summarize">Summarize</button>
@@ -2013,6 +2014,46 @@ function escapeHtml(str) {
       const uniswapV4Hook = identifyUniswapV4Hook(functions);
       if (uniswapV4Hook.isCandidate) identifiers.push(uniswapV4Hook);
       return identifiers;
+    }
+
+    function getSidebarContractBadges(functions) {
+      const selectorIds = new Set((functions || []).map(record => normalizeSelectorId(record?.selector)).filter(Boolean));
+      const badges = [];
+
+      if (selectorIds.has('0xa22cb465')) {
+        badges.push({
+          id: 'nft-erc721',
+          label: 'NFT ERC721',
+          selector: '0xa22cb465',
+          signature: 'setApprovalForAll(address,bool)'
+        });
+      }
+
+      return badges;
+    }
+
+    function renderContractBadgeList(functions, className) {
+      const badges = getSidebarContractBadges(functions);
+      if (badges.length === 0) return '';
+
+      return `<div class="${escapeHtml(className)}">${badges.map(badge => `
+        <span class="contract-identifier-badge ${escapeHtml(badge.id)}" title="${escapeHtml(`${badge.selector} ${badge.signature}`)}">
+          ${escapeHtml(badge.label)}
+        </span>
+      `).join('')}</div>`;
+    }
+
+    function updateSummaryContractBadges(functions) {
+      const target = summaryPanel.querySelector('.summary-identifiers');
+      if (!target) return;
+
+      const badges = getSidebarContractBadges(functions);
+      target.innerHTML = badges.map(badge => `
+        <span class="contract-identifier-badge ${escapeHtml(badge.id)}" title="${escapeHtml(`${badge.selector} ${badge.signature}`)}">
+          ${escapeHtml(badge.label)}
+        </span>
+      `).join('');
+      target.style.display = badges.length > 0 ? 'flex' : 'none';
     }
 
     function summarizeImplementationDifferences(functions, identifiers = detectContractIdentifiers(functions)) {
@@ -4120,6 +4161,7 @@ function escapeHtml(str) {
           });
 
           let selectorsHtml = '';
+          selectorsHtml += renderContractBadgeList(selectorRecords, 'selector-identifier-strip');
 
           // Show implementation address if proxy detected
           if (event.data.implementationAddress) {
@@ -4179,6 +4221,7 @@ function escapeHtml(str) {
                 : null
             };
             rememberCurrentRelatedContract();
+            updateSummaryContractBadges(selectorRecords);
 
             renderPanelBody(`<div id="selectors">${selectorsHtml}</div>`);
             hydrateCachedSummary();
@@ -4282,6 +4325,7 @@ function escapeHtml(str) {
           }
         } else if (panel && panel.parentNode) {
           const errorMsg = event.data.error || 'No function selectors found';
+          updateSummaryContractBadges([]);
           renderPanelBody(`<div id="selectors"><div class="error-notice">${escapeHtml(errorMsg)}</div></div>`);
         }
       }

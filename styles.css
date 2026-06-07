@@ -230,6 +230,12 @@
   color: #ff8f8f;
 }
 
+.summary-identifiers {
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
 .summary-actions {
   display: flex;
   flex-wrap: wrap;
@@ -709,6 +715,36 @@
   height: 2px;
   background: linear-gradient(to right, transparent, #e67e22, transparent);
   margin: 16px 0;
+}
+
+.selector-identifier-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 10px 0;
+}
+
+.contract-identifier-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid rgba(46, 204, 113, 0.48);
+  border-radius: 4px;
+  background: rgba(46, 204, 113, 0.16);
+  color: #7ee2a8;
+  font-family: Monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.contract-identifier-badge.nft-erc721 {
+  border-color: rgba(52, 152, 219, 0.5);
+  background: rgba(52, 152, 219, 0.16);
+  color: #8fc6ff;
 }
 
 /* Queryable function styles */
