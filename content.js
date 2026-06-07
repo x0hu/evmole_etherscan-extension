@@ -949,7 +949,7 @@ function escapeHtml(str) {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 3500);
     try {
-      await fetch(`${baseUrl}/ai-selector-names`, {
+      const response = await fetch(`${baseUrl}/ai-selector-names`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -958,6 +958,10 @@ function escapeHtml(str) {
           names: normalizedNames
         })
       });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        console.log('AI selector name cache store failed:', response.status, payload?.error || response.statusText);
+      }
     } catch (e) {
       console.log('AI selector name cache store error:', e?.message || e);
     } finally {
