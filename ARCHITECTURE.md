@@ -6,10 +6,13 @@ Detailed breakdown of the EVMole Etherscan Extension codebase. ~4,500 lines of r
 
 | File | Lines | Role |
 |------|-------|------|
-| `manifest.json` | 219 | MV3 config: content script groups, permissions, supported domains |
+| `manifest.json` | 255 | MV3 config: content script groups, permissions, supported domains |
+| `chain-rpcs.json` | 178 | Shared RPC endpoint registry used by contract analysis |
 | `content.js` | 502 | Main content script: right-side panel, selector display, query execution |
-| `evmole-script.js` | 776 | Page-context module: bytecode extraction, proxy detection, hedged RPC |
-| `decode_calldata.js` | 2076 | Tx-page calldata decoder: ABI guesser, adapters, nested decode UI |
+| `evmole-script.js` | 1427 | Page-context module: bytecode extraction, proxy detection, hedged RPC |
+| `decode_calldata.js` | 2141 | Tx-page calldata decoder: ABI guesser, adapters, nested decode UI |
+| `event-log-decoder/event_log_decoder.js` | 1242 | Tx receipt event-log handler: leaves named rows native, defaults native ABI rows to ABI, decodes unnamed Dec/Hex-only rows with event head/tail + Swiss Knife-style ABI structure guessing, and background-prepopulates `/tx/*` logs |
+| `event-log-decoder/event_log_view_bridge.js` | 68 | Page-context bridge for invoking native explorer event-log view switches |
 | `etherscan_contract_info.js` | 167 | Left-side panel: NatSpec/header comment extraction from source |
 | `qol_buttons.js` | 328 | UX buttons: Incoming/CA Create filters, funded tx copy, 100-row auto-select |
 | `remove_from_page_qol.js` | 131 | Early ad/sponsored element removal (runs at document_start) |
@@ -31,9 +34,9 @@ Three injection groups with different triggers:
 |-------|---------|-------|--------|
 | 1 | `content.js`, `etherscan_contract_info.js`, `qol_buttons.js` | `/address/*`, `/token/*`, `/tx*`, `/txs*` | document_idle |
 | 2 | `remove_from_page_qol.js` + `.css` | `/address/*`, `/tx*` | document_start |
-| 3 | `decode_calldata.js` | `/tx/*` only | document_idle |
+| 3 | `decode_calldata.js`, `event-log-decoder/event_log_decoder.js` | `/tx/*` only | document_idle |
 
-Web-accessible resources: `evmole-script.js` and `styles.css` (needed for page-context injection and panel styling).
+Web-accessible resources: `evmole-script.js`, `styles.css`, `chain-rpcs.json`, and `event-log-decoder/event_log_view_bridge.js` (needed for page-context injection, panel styling, contract-analysis RPC configuration, and native event-log ABI switching).
 
 Supported explorers: 30+ Etherscan-family domains (Ethereum, Base, Arbitrum, Optimism, Polygon, Avalanche, BSC, zkSync, Scroll, Linea, Blast, Fraxtal, Taiko, HyperEVM, Monad, MegaETH, and their testnets).
 

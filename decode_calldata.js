@@ -8,12 +8,16 @@
   const MAX_AUTO_EXPAND_ITEMS = 150;
   const MAX_AUTO_EXPAND_HEX_BYTES = 32768;
   const MAX_NESTED_DECODE_DEPTH = 12;
+  const INPUT_VIEW_BRIDGE_ID = 'evmole-calldata-view-bridge';
+  const INPUT_VIEW_EVENT_NAME = 'EVMOLE_SET_INPUT_VIEW';
   const pendingAutoExpand = {}; // Store calldata for auto-expand by ID
   const autoExpandInFlight = new WeakSet();
   let autoExpandCount = 0;
   let disableInputViewAutoSet = false;
   let originalAppliedForCalldata = null;
   let originalViewRetryTimer = null;
+  let inputViewBridgeLoaded = false;
+  const inputViewBridgeQueue = [];
 
   // Unit conversion options
   const UNIT_OPTIONS = [
@@ -48,6 +52,62 @@
     }) || null;
   }
 
+  function ensureInputViewBridge() {
+    if (inputViewBridgeLoaded) return;
+    if (document.getElementById(INPUT_VIEW_BRIDGE_ID)) return;
+
+    const script = document.createElement('script');
+    script.id = INPUT_VIEW_BRIDGE_ID;
+    script.src = chrome.runtime.getURL('calldata-view-bridge.js');
+    script.onload = () => {
+      inputViewBridgeLoaded = true;
+      while (inputViewBridgeQueue.length) {
+        const queuedDispatch = inputViewBridgeQueue.shift();
+        queuedDispatch();
+      }
+      script.remove();
+    };
+    script.onerror = () => {
+      console.warn('[decode_calldata] failed to load calldata view bridge');
+    };
+
+    (document.head || document.documentElement).appendChild(script);
+  }
+
+  function dispatchInputView(mode) {
+    const dispatch = () => {
+      window.dispatchEvent(new CustomEvent(INPUT_VIEW_EVENT_NAME, {
+        detail: { mode }
+      }));
+    };
+
+    ensureInputViewBridge();
+    if (inputViewBridgeLoaded) {
+      dispatch();
+    } else {
+      inputViewBridgeQueue.push(dispatch);
+    }
+  }
+
+  function markInputViewActive(link) {
+    const menu = link.closest('.dropdown-menu');
+    if (!menu) return;
+
+    menu.querySelectorAll('.dropdown-item.active').forEach(item => {
+      item.classList.remove('active');
+    });
+    link.classList.add('active');
+  }
+
+  function isAddressValue(value) {
+    return typeof value === 'string' && /^0x[a-fA-F0-9]{40}$/.test(value);
+  }
+
+  function getExplorerAddressUrl(value) {
+    if (!isAddressValue(value)) return null;
+    return `${window.location.origin}/address/${value}`;
+  }
+
   function setInputViewToOriginalDefault() {
     if (disableInputViewAutoSet) return;
 
@@ -65,9 +125,10 @@
       return;
     }
 
-    originalLink.click();
+    dispatchInputView('original');
+    markInputViewActive(originalLink);
 
-    if ((originalLink.classList.contains('active') || (menu && menu.querySelector('.dropdown-item.active') === originalLink)) && signature) {
+    if (signature) {
       originalAppliedForCalldata = signature;
     }
   }
@@ -1583,8 +1644,12 @@
       return { html: `<div class="array-items" style="max-width:100%;">${items}</div>`, isBytes: false };
     }
     if (type === 'address') {
+      const addressUrl = getExplorerAddressUrl(value);
+      if (!addressUrl) {
+        return { html: `<span class="hash-tag text-nowrap">${escapeHtml(String(value))}</span>`, isBytes: false };
+      }
       return {
-        html: `<a href="/address/${value}" class="hash-tag text-nowrap" target="_blank">${value}</a>`,
+        html: `<a href="${addressUrl}" class="hash-tag text-nowrap" target="_blank" rel="noopener noreferrer">${escapeHtml(value)}</a>`,
         isBytes: false
       };
     }

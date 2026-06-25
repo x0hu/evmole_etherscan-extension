@@ -21,49 +21,7 @@ const SAFE_FALLBACK_FUNCTIONS = [
   { selector: '0xffa1ad74', args: '()', mutability: 'view', signature: 'VERSION()' },
 ];
 
-const CHAIN_CONFIG = {
-  // Testnets (check first - more specific hostnames)
-  'sepolia.etherscan.io': { rpcs: ['https://ethereum-sepolia.gateway.tatum.io', 'https://gateway.tenderly.co/public/sepolia', 'https://ethereum-sepolia-rpc.publicnode.com'] },
-  'sepolia.basescan.org': { rpcs: ['https://base-sepolia.gateway.tenderly.co', 'https://base-sepolia.drpc.org', 'https://base-sepolia-rpc.publicnode.com'] },
-  'testnet.monadscan.com': { rpcs: ['https://testnet-rpc.monad.xyz'] },
-  // Mainnets
-  'etherscan.io': { rpcs: ['https://eth.llamarpc.com', 'https://eth.drpc.org', 'https://rpc.ankr.com/eth'] },
-  'mega.etherscan.io': { rpcs: ['https://mainnet.megaeth.com/rpc', 'https://megaeth.drpc.org', 'https://rpc-megaeth-mainnet.globalstake.io'] },
-  'fraxscan.com': { rpcs: ['https://rpc.frax.com', 'https://fraxtal-rpc.publicnode.com', 'https://fraxtal.gateway.tenderly.co'] },
-  'hyperevmscan.io': { rpcs: ['https://rpc.hypurrscan.io', 'https://rpc.hyperliquid.xyz/evm', 'https://hyperliquid.drpc.org', 'https://hyperliquid-json-rpc.stakely.io'] },
-  'taikoscan.io': { rpcs: ['https://rpc.ankr.com/taiko', 'https://rpc.taiko.xyz', 'https://rpc.mainnet.taiko.xyz', 'https://taiko.drpc.org'] },
-  'basescan.org': { rpcs: [
-    'https://base-rpc.publicnode.com',
-    'https://base.lava.build',
-    'https://base.drpc.org',
-    'https://base.public.blockpi.network/v1/rpc/public',
-    'https://base-public.nodies.app',
-    'https://gateway.tenderly.co/public/base',
-    'https://base.rpc.blxrbdn.com',
-    'https://base.api.pocket.network',
-    'https://api-base-mainnet-archive.n.dwellir.com/2ccf18bf-2916-4198-8856-42172854353c',
-    'https://mainnet.base.org',
-    'https://base-mainnet.gateway.tatum.io'
-  ] },
-  'arbiscan.io': { rpcs: ['https://arb1.arbitrum.io/rpc', 'https://arbitrum.drpc.org', 'https://rpc.ankr.com/arbitrum'] },
-  'optimistic.etherscan.io': { rpcs: ['https://mainnet.optimism.io', 'https://optimism.drpc.org', 'https://rpc.ankr.com/optimism'] },
-  'polygonscan.com': { rpcs: ['https://polygon-rpc.com', 'https://polygon.drpc.org', 'https://rpc.ankr.com/polygon'] },
-  'bscscan.com': { rpcs: ['https://bsc-dataseed.binance.org', 'https://bsc.drpc.org', 'https://rpc.ankr.com/bsc'] },
-  'blastscan.io': { rpcs: ['https://rpc.blast.io', 'https://blast.drpc.org'] },
-  'sonicscan.org': { rpcs: ['https://rpc.soniclabs.com'] },
-  'lineascan.build': { rpcs: ['https://rpc.linea.build', 'https://linea.drpc.org'] },
-  'scrollscan.com': { rpcs: ['https://rpc.scroll.io', 'https://scroll.drpc.org'] },
-  'era.zksync.network': { rpcs: ['https://mainnet.era.zksync.io', 'https://zksync.drpc.org'] },
-  'berascan.com': { rpcs: ['https://rpc.berachain.com'] },
-  'mantlescan.xyz': { rpcs: ['https://rpc.mantle.xyz', 'https://mantle.drpc.org'] },
-  'snowtrace.io': { rpcs: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche.drpc.org'] },
-  'snowscan.xyz': { rpcs: ['https://api.avax.network/ext/bc/C/rpc', 'https://avalanche.drpc.org'] },
-  'uniscan.xyz': { rpcs: ['https://mainnet.unichain.org'] },
-  'worldscan.org': { rpcs: ['https://worldchain-mainnet.g.alchemy.com/public'] },
-  'apescan.io': { rpcs: ['https://rpc.apechain.com/http'] },
-  'abscan.org': { rpcs: ['https://api.mainnet.abs.xyz'] },
-  'monadscan.com': { rpcs: ['https://rpc.monad.xyz'] },
-};
+const CHAIN_CONFIG = await loadChainConfig();
 
 const QUERY_HEDGE_STAGGER_MS = 180;
 const QUERY_HEDGE_MAX_RPCS = 3;
@@ -75,6 +33,17 @@ const rpcCooldownUntil = new Map();
 const addressCodeLookupCache = new Map();
 const UINT64_MAX = BigInt('0xffffffffffffffff');
 const UINT160_MAX = BigInt('0xffffffffffffffffffffffffffffffffffffffff');
+
+async function loadChainConfig() {
+  try {
+    const response = await fetch(new URL('chain-rpcs.json', import.meta.url));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  } catch (error) {
+    console.error('Failed to load chain RPC config:', error);
+    return {};
+  }
+}
 
 function getInjectedExtensionConfig() {
   const script = Array.from(document.scripts).reverse().find(candidate => {
@@ -106,7 +75,7 @@ function getChainConfig() {
       return config;
     }
   }
-  return CHAIN_CONFIG['etherscan.io'];
+  return CHAIN_CONFIG['etherscan.io'] || { rpcs: [] };
 }
 
 function getContractAddress() {

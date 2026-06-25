@@ -240,12 +240,12 @@
         "https://sepolia.basescan.org/tx/*",
         "https://mega.etherscan.io/tx/*"
       ],
-      "js": ["decode_calldata.js"]
+      "js": ["decode_calldata.js", "event-log-decoder/event_log_decoder.js"]
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["evmole-script.js", "styles.css"],
+      "resources": ["evmole-script.js", "styles.css", "chain-rpcs.json", "event-log-decoder/event_log_view_bridge.js", "calldata-view-bridge.js"],
       "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://blastscan.io/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://snowscan.xyz/*",
       "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
       "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*", "https://berascan.com/*", "https://apescan.io/*", "https://mantlescan.xyz/*",
