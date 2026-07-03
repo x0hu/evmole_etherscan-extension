@@ -43,10 +43,15 @@ function escapeHtml(str) {
   const CODEX_SUMMARY_PRIORITY_MODEL = 'gpt-5.5:priority';
   const SUMMARY_CONTEXT_BUDGET_BYTES = 90000;
   const SUMMARY_READ_PURPOSE = 'SUMMARY_CONTEXT';
+  const SELECTOR_NAME_READ_PURPOSE = 'SELECTOR_NAME_CONTEXT';
   const CHAT_TOOL_READ_PURPOSE = 'CHAT_TOOL_READ';
   const SUMMARY_MIN_AUTO_READ_LIMIT = 10;
-  const SELECTOR_NAME_BYTECODE_CHAR_LIMIT = 120000;
+  const SELECTOR_NAME_BYTECODE_CHAR_LIMIT = 80000;
   const SELECTOR_NAME_BATCH_SIZE = 40;
+  const SELECTOR_NAME_RICH_BATCH_SIZE = 12;
+  const SELECTOR_NAME_READ_EVIDENCE_LIMIT = 4;
+  const SELECTOR_NAME_READ_TIMEOUT_MS = 3000;
+  const SELECTOR_NAME_READ_STAGGER_MS = 100;
   const SUMMARY_MAX_AUTO_READ_LIMIT = 20;
   const SUMMARY_RELOAD_READ_LIMIT = 35;
   const SUMMARY_AUTO_READ_TIMEOUT_MS = 3000;
@@ -904,7 +909,7 @@ function escapeHtml(str) {
       heuristicName,
       confidence,
       reasoning: String(entry?.reasoning || '').trim().slice(0, 500),
-      source: 'codex'
+      source: entry?.source === 'fallback' ? 'fallback' : 'codex'
     };
   }
 
@@ -4172,10 +4177,90 @@ function escapeHtml(str) {
       };
     }
 
-    function buildSelectorNameContext(selectorRecords, eventData, cacheParams, targetRecords = null) {
+    function selectorNameBaseName(signature) {
+      return String(signature || '').split('(')[0].trim();
+    }
+
+    function isMeaningfulKnownFunctionName(name) {
+      const value = String(name || '').trim();
+      if (!value || value === 'Unknown') return false;
+      const lower = value.toLowerCase();
+      const genericNames = new Set([
+        'name', 'symbol', 'decimals', 'totalsupply', 'balanceof', 'allowance',
+        'approve', 'transfer', 'transferfrom', 'owner', 'renounceownership',
+        'transferownership', 'supportsinterface'
+      ]);
+      if (genericNames.has(lower)) return false;
+      return /[a-z]/i.test(value) && value.length >= 4;
+    }
+
+    function isSelectorNameNoArgRead(record) {
+      if (!record?.isRead) return false;
+      const inputTypes = Array.isArray(record.inputTypes) ? record.inputTypes.filter(Boolean) : [];
+      return (record.args || '()') === '()' && inputTypes.length === 0;
+    }
+
+    function profileSelectorNameRequest(selectorRecords, targetRecords, eventData, options = {}) {
+      const includeNamedUnknowns = !!options.includeNamedUnknowns;
+      const allRecords = Array.isArray(selectorRecords) ? selectorRecords : [];
+      const recordsToName = Array.isArray(targetRecords) ? targetRecords : allRecords.filter(record => record?.isUnknown && !record.heuristicName);
+      const unknownCount = recordsToName.filter(record => record?.isUnknown && (includeNamedUnknowns || !record.heuristicName)).length;
+      const knownRecords = allRecords.filter(record => !record?.isUnknown);
+      const knownNames = [...new Set(knownRecords.map(record => selectorNameBaseName(record.signature)).filter(Boolean))];
+      const meaningfulKnownNames = knownNames.filter(isMeaningfulKnownFunctionName);
+      const knownCount = knownRecords.length;
+      const allUnknownCount = allRecords.filter(record => record?.isUnknown).length;
+      const denominator = knownCount + allUnknownCount;
+      const knownCoverage = denominator > 0 ? knownCount / denominator : 0;
+      const unknownNoArgReadCount = recordsToName.filter(isSelectorNameNoArgRead).length;
+      const bytecodeSize = String(eventData?.analyzedBytecode || '').length;
+      const vocabularyStrength = meaningfulKnownNames.length >= 6 ? 'strong' : (meaningfulKnownNames.length >= 3 ? 'moderate' : 'weak');
+
+      return {
+        unknownCount,
+        knownCount,
+        knownCoverage: Number(knownCoverage.toFixed(3)),
+        unknownNoArgReadCount,
+        bytecodeSize,
+        vocabularyStrength,
+        meaningfulKnownNameCount: meaningfulKnownNames.length
+      };
+    }
+
+    function chooseSelectorNameContextMode(profile, { retry = false } = {}) {
+      if (retry) return 'rich';
+      if (!profile || profile.unknownCount <= 0) return 'compact';
+      const strongKnownContext = profile.knownCoverage >= 0.7 && profile.vocabularyStrength !== 'weak';
+      if (profile.unknownCount <= 4 && strongKnownContext) return 'compact';
+      if (profile.unknownCount > 12 || profile.knownCoverage < 0.5 || profile.vocabularyStrength === 'weak') return 'balanced';
+      return 'compact';
+    }
+
+    function selectorNameBatchSizeForMode(contextMode) {
+      return contextMode === 'rich' ? SELECTOR_NAME_RICH_BATCH_SIZE : SELECTOR_NAME_BATCH_SIZE;
+    }
+
+    function shouldIncludeSelectorNameBytecode(contextMode) {
+      return contextMode === 'balanced' || contextMode === 'rich';
+    }
+
+    function compactSelectorNameReadEvidence(result) {
+      if (!result) return null;
+      return {
+        selector: normalizeSelectorId(result.selector),
+        signature: String(result.signature || result.name || '').slice(0, 120),
+        success: !!result.success,
+        value: result.success ? String(result.value ?? '').slice(0, 500) : null,
+        error: result.success ? null : String(result.error || 'Read query failed').slice(0, 160)
+      };
+    }
+
+    function buildSelectorNameContext(selectorRecords, eventData, cacheParams, targetRecords = null, options = {}) {
+      const contextMode = options.contextMode || 'balanced';
+      const includeNamedUnknowns = !!options.includeNamedUnknowns;
       const recordsToName = Array.isArray(targetRecords) ? targetRecords : selectorRecords;
       const unknownSelectors = (recordsToName || [])
-        .filter(record => record?.isUnknown && !record.heuristicName)
+        .filter(record => record?.isUnknown && (includeNamedUnknowns || !record.heuristicName))
         .map(record => ({
           selector: normalizeSelectorId(record.selector),
           args: record.args || '',
@@ -4183,7 +4268,7 @@ function escapeHtml(str) {
           inputTypes: record.inputTypes || [],
           isRead: !!record.isRead
         }))
-        .slice(0, SELECTOR_NAME_BATCH_SIZE);
+        .slice(0, selectorNameBatchSizeForMode(contextMode));
 
       const knownFunctions = (selectorRecords || [])
         .filter(record => !record?.isUnknown)
@@ -4203,8 +4288,9 @@ function escapeHtml(str) {
         .filter(Boolean))]
         .slice(0, 80);
 
-      return {
+      const context = {
         promptVersion: SELECTOR_NAME_PROMPT_VERSION,
+        contextMode,
         chainHost: window.location.hostname,
         pageUrl: window.location.href,
         contractAddress,
@@ -4212,7 +4298,7 @@ function escapeHtml(str) {
         implementationPath: Array.isArray(eventData.implementationPath) ? eventData.implementationPath : [],
         bytecodeSource: eventData.bytecodeSource || null,
         bytecodeHash: cacheParams.bytecodeHash,
-        bytecode: compactSelectorNameBytecode(eventData.analyzedBytecode),
+        bytecodeIncluded: shouldIncludeSelectorNameBytecode(contextMode),
         unknownSelectors,
         unknownSelectorTable: unknownSelectors
           .map(record => `${record.selector} ${record.args || '()'} ${record.mutability || ''} Unknown`)
@@ -4220,8 +4306,19 @@ function escapeHtml(str) {
         knownFunctions,
         knownFunctionNames,
         knownFunctionTable,
+        selectorNameProfile: options.profile || profileSelectorNameRequest(selectorRecords, targetRecords, eventData, { includeNamedUnknowns }),
         note: 'Heuristic names are provisional UI labels for selectors whose real ABI signature is unknown.'
       };
+      if (shouldIncludeSelectorNameBytecode(contextMode)) {
+        context.bytecode = compactSelectorNameBytecode(eventData.analyzedBytecode);
+      }
+      const readEvidence = Array.isArray(options.readEvidence)
+        ? options.readEvidence.map(compactSelectorNameReadEvidence).filter(Boolean)
+        : [];
+      if (readEvidence.length > 0) {
+        context.readEvidence = readEvidence;
+      }
+      return context;
     }
 
     function applyAiSelectorNames(selectorRecords, names) {
@@ -4237,7 +4334,7 @@ function escapeHtml(str) {
         const entry = normalized.get(normalizeSelectorId(record.selector));
         if (!entry) return;
         record.heuristicName = entry.heuristicName;
-        record.heuristicSource = 'codex';
+        record.heuristicSource = entry.source;
         record.heuristicConfidence = entry.confidence;
         record.heuristicReasoning = entry.reasoning;
         applied.push(entry);
@@ -4249,7 +4346,7 @@ function escapeHtml(str) {
 	        item.classList.add('highlight-ai-heuristic');
 	        item.dataset.heuristicName = entry.heuristicName;
 	        item.dataset.heuristicConfidence = entry.confidence;
-	        item.dataset.heuristicSource = 'codex';
+	        item.dataset.heuristicSource = entry.source;
 	        item.dataset.querySignature = displayName;
 	        const functionNameEl = item.querySelector('.function-name');
         if (functionNameEl) {
@@ -4287,6 +4384,80 @@ function escapeHtml(str) {
       });
     }
 
+    function requestSelectorNameRead(record, index) {
+      return new Promise(resolve => {
+        const selector = normalizeSelectorId(record.selector);
+        const requestId = `selector-name-${Date.now()}-${index}-${selector.slice(2)}`;
+        const displayName = record.heuristicName || 'unknown';
+        const signature = `${displayName}${record.args || '()'}`;
+        const timeout = window.setTimeout(() => {
+          summaryReadRequests.delete(requestId);
+          resolve({
+            selector,
+            signature,
+            success: false,
+            error: 'Read query timed out'
+          });
+        }, SELECTOR_NAME_READ_TIMEOUT_MS);
+
+        summaryReadRequests.set(requestId, payload => {
+          window.clearTimeout(timeout);
+          resolve({
+            selector,
+            signature,
+            success: !!payload.success,
+            value: payload.success ? String(payload.result ?? '') : null,
+            error: payload.success ? null : String(payload.error || 'Read query failed')
+          });
+        });
+
+        window.setTimeout(() => {
+          if (!panel.isConnected) {
+            summaryReadRequests.delete(requestId);
+            window.clearTimeout(timeout);
+            resolve({
+              selector,
+              signature,
+              success: false,
+              error: 'Panel closed'
+            });
+            return;
+          }
+
+          window.postMessage({
+            type: 'QUERY_READ_FUNCTION',
+            purpose: SELECTOR_NAME_READ_PURPOSE,
+            requestId,
+            selector,
+            signature,
+            contractAddress,
+            inputTypes: [],
+            inputValues: []
+          }, '*');
+        }, index * SELECTOR_NAME_READ_STAGGER_MS);
+      });
+    }
+
+    async function requestSelectorNameReadEvidence(records) {
+      const candidates = (records || [])
+        .filter(record => record?.isUnknown && isSelectorNameNoArgRead(record))
+        .slice(0, SELECTOR_NAME_READ_EVIDENCE_LIMIT);
+      if (candidates.length === 0) return [];
+      const results = await Promise.all(candidates.map((record, index) => requestSelectorNameRead(record, index)));
+      return results.map(compactSelectorNameReadEvidence).filter(Boolean);
+    }
+
+    function selectSelectorNameRetryRecords(batchRecords, applied) {
+      const appliedBySelector = new Map((applied || [])
+        .map(entry => [normalizeSelectorId(entry.selector), entry]));
+      return (batchRecords || []).filter(record => {
+        const selector = normalizeSelectorId(record.selector);
+        const entry = appliedBySelector.get(selector);
+        if (!entry) return true;
+        return entry.source === 'fallback' || entry.confidence === 'low';
+      });
+    }
+
     async function requestAiSelectorNames(selectorRecords, eventData, cacheParams) {
       const unknownRecords = (selectorRecords || []).filter(record => record?.isUnknown && !record.heuristicName);
       if (unknownRecords.length === 0 || !cacheParams?.bytecodeHash || !eventData?.analyzedBytecode) return;
@@ -4295,24 +4466,33 @@ function escapeHtml(str) {
         return;
       }
 
-      for (let index = 0; index < unknownRecords.length; index += SELECTOR_NAME_BATCH_SIZE) {
-        const batchRecords = unknownRecords.slice(index, index + SELECTOR_NAME_BATCH_SIZE)
+      const initialProfile = profileSelectorNameRequest(selectorRecords, unknownRecords, eventData);
+      const initialContextMode = chooseSelectorNameContextMode(initialProfile);
+      const initialBatchSize = selectorNameBatchSizeForMode(initialContextMode);
+
+      for (let index = 0; index < unknownRecords.length; index += initialBatchSize) {
+        const batchRecords = unknownRecords.slice(index, index + initialBatchSize)
           .filter(record => record?.isUnknown && !record.heuristicName);
         if (batchRecords.length === 0) continue;
 
         const batchSelectors = batchRecords
           .map(record => normalizeSelectorId(record.selector))
           .filter(Boolean);
+        const batchProfile = profileSelectorNameRequest(selectorRecords, batchRecords, eventData);
+        const contextMode = chooseSelectorNameContextMode(batchProfile);
         const batchCacheParams = {
           ...cacheParams,
           selectors: batchSelectors
         };
         const response = await chromeMessage({
           type: CODEX_SELECTOR_NAMES_TYPE,
-          context: buildSelectorNameContext(selectorRecords, eventData, batchCacheParams, batchRecords),
+          context: buildSelectorNameContext(selectorRecords, eventData, batchCacheParams, batchRecords, {
+            contextMode,
+            profile: batchProfile
+          }),
           fastMode: !!settings.codexFastMode,
           reasoningEffort: 'low',
-          dedupeKey: stableStringify(batchCacheParams)
+          dedupeKey: stableStringify({ ...batchCacheParams, contextMode })
         });
         if (!response?.ok) {
           console.log('Codex selector naming failed:', response?.error || response, { selectors: batchSelectors });
@@ -4322,11 +4502,54 @@ function escapeHtml(str) {
 
         const applied = applyAiSelectorNames(selectorRecords, response.names || []);
         if (applied.length > 0) {
+          const cacheable = applied.filter(entry => entry.source !== 'fallback');
           await storeAiSelectorNameCache(settings, {
             ...batchCacheParams,
             model: response.model || batchCacheParams.model,
             promptVersion: response.promptVersion || batchCacheParams.promptVersion
-          }, applied);
+          }, cacheable);
+        }
+
+        const retryRecords = contextMode === 'rich'
+          ? []
+          : selectSelectorNameRetryRecords(batchRecords, applied).slice(0, SELECTOR_NAME_RICH_BATCH_SIZE);
+        if (retryRecords.length > 0) {
+          const retrySelectors = retryRecords.map(record => normalizeSelectorId(record.selector)).filter(Boolean);
+          const readEvidence = await requestSelectorNameReadEvidence(retryRecords);
+          const retryCacheParams = {
+            ...batchCacheParams,
+            selectors: retrySelectors
+          };
+          const retryProfile = profileSelectorNameRequest(selectorRecords, retryRecords, eventData, { includeNamedUnknowns: true });
+          const retryResponse = await chromeMessage({
+            type: CODEX_SELECTOR_NAMES_TYPE,
+            context: buildSelectorNameContext(selectorRecords, eventData, retryCacheParams, retryRecords, {
+              contextMode: chooseSelectorNameContextMode(retryProfile, { retry: true }),
+              includeNamedUnknowns: true,
+              profile: retryProfile,
+              readEvidence
+            }),
+            fastMode: !!settings.codexFastMode,
+            reasoningEffort: 'low',
+            dedupeKey: stableStringify({
+              ...retryCacheParams,
+              contextMode: 'rich',
+              readEvidenceSelectors: readEvidence.map(entry => entry.selector)
+            })
+          });
+          if (retryResponse?.ok) {
+            const retryApplied = applyAiSelectorNames(selectorRecords, retryResponse.names || []);
+            if (retryApplied.length > 0) {
+              const cacheable = retryApplied.filter(entry => entry.source !== 'fallback');
+              await storeAiSelectorNameCache(settings, {
+                ...retryCacheParams,
+                model: retryResponse.model || retryCacheParams.model,
+                promptVersion: retryResponse.promptVersion || retryCacheParams.promptVersion
+              }, cacheable);
+            }
+          } else {
+            console.log('Codex selector naming rich retry failed:', retryResponse?.error || retryResponse, { selectors: retrySelectors });
+          }
         }
 
         const appliedSelectors = new Set(applied.map(entry => normalizeSelectorId(entry.selector)));
@@ -4439,9 +4662,9 @@ function escapeHtml(str) {
               <div class="selector-item ${highlightClass} ${queryableClass}"
                    data-selector="${selectorId}"
 	                   data-signature="${functionName}"
-	                   data-query-signature="${escapeHtml(aiName ? displayName : functionName)}"
+                   data-query-signature="${escapeHtml(aiName ? displayName : functionName)}"
 	                   data-heuristic-name="${escapeHtml(aiName?.heuristicName || '')}"
-                   data-heuristic-source="${aiName ? 'codex' : ''}"
+                   data-heuristic-source="${escapeHtml(aiName?.source || '')}"
                    data-heuristic-confidence="${escapeHtml(aiName?.confidence || '')}"
                    data-queryable="${isNoArgRead || isParameterizedRead}"
                    data-param-types="${escapeHtml(JSON.stringify(normalizedParamTypes.filter(Boolean)))}">
@@ -4467,7 +4690,7 @@ function escapeHtml(str) {
               isRead: isReadFunction,
               isUnknown: isRealUnknown,
               heuristicName: aiName?.heuristicName || '',
-              heuristicSource: aiName ? 'codex' : '',
+              heuristicSource: aiName?.source || '',
               heuristicConfidence: aiName?.confidence || '',
               heuristicReasoning: aiName?.reasoning || ''
             });
@@ -4673,7 +4896,7 @@ function escapeHtml(str) {
           panel.addDiscoveredLinks?.(extractLinksFromResultValue(linkScanValue));
         }
         if (purpose === 'LINK_SCAN') return;
-        if (purpose === SUMMARY_READ_PURPOSE) {
+        if (purpose === SUMMARY_READ_PURPOSE || purpose === SELECTOR_NAME_READ_PURPOSE) {
           const resolver = summaryReadRequests.get(event.data.requestId);
           if (resolver) {
             summaryReadRequests.delete(event.data.requestId);

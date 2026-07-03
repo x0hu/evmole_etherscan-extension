@@ -33,7 +33,8 @@
     "http://*/*"
   ],
   "background": {
-    "service_worker": "bridge-origin/background.js"
+    "service_worker": "bridge-origin/background.js",
+    "type": "module"
   },
   "content_scripts": [
     {
