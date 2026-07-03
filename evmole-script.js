@@ -21,6 +21,19 @@ const SAFE_FALLBACK_FUNCTIONS = [
   { selector: '0xffa1ad74', args: '()', mutability: 'view', signature: 'VERSION()' },
 ];
 
+function detectMinimalProxyImplementation(bytecode) {
+  const normalized = String(bytecode || '').toLowerCase();
+  const exactMatch = normalized.match(MINIMAL_PROXY_REGEX);
+  if (exactMatch) return '0x' + exactMatch[1];
+
+  // Some EIP-1167-style clones use an equivalent runtime that is not the
+  // canonical byte-for-byte sequence. The implementation remains the PUSH20
+  // argument immediately before GAS + DELEGATECALL.
+  if (normalized.length > 260) return null;
+  const delegateCallMatch = normalized.match(/73([a-f0-9]{40})5af4/);
+  return delegateCallMatch ? '0x' + delegateCallMatch[1] : null;
+}
+
 const CHAIN_CONFIG = await loadChainConfig();
 
 const QUERY_HEDGE_STAGGER_MS = 180;
@@ -454,10 +467,9 @@ async function detectProxyImplementation(address, bytecode) {
   const ZERO_ADDR = '0x' + '0'.repeat(40);
 
   // 1. Check EIP-1167 minimal proxy (bytecode pattern) - instant, no RPC
-  const match = bytecode.match(MINIMAL_PROXY_REGEX);
-  if (match) {
-    const impl = '0x' + match[1];
-    console.log('EIP-1167 minimal proxy detected, impl:', impl);
+  const impl = detectMinimalProxyImplementation(bytecode);
+  if (impl) {
+    console.log('EIP-1167-style minimal proxy detected, impl:', impl);
     return impl;
   }
 
