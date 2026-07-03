@@ -34,6 +34,25 @@ Supported explorers include Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, S
 - Signature decoding may query public signature services when a selector is unknown locally.
 - Private selector signatures can be served from the optional resolver in `signature-db/`.
 
+## Maintaining EVMole
+
+`evmole-script.js` imports EVMole from a pinned jsDelivr URL. Keep this pinned to an exact version instead of using `@latest`, because EVMole has changed its JavaScript API across releases.
+
+To check for updates:
+
+```sh
+npm view evmole version
+rg "evmole@" evmole-script.js
+```
+
+When bumping the pinned version, confirm the CDN module still exports `contractInfo` and that the adjacent WASM asset is available. Also smoke-test the known mutability regression that prompted the update:
+
+- Ethereum mainnet contract: `0x1e0019207f5aed8d37fb41ea3a74b83de1405eb9`
+- Selector: `0x137f1fdd`
+- Expected mutability: `nonpayable`
+
+This keeps the extension current while avoiding silent breakage from an unpinned CDN dependency.
+
 ## Credits
 
 - [EVMole](https://github.com/cdump/evmole) for selector extraction from bytecode.

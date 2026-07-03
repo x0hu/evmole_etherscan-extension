@@ -1,4 +1,47 @@
-import { functionSelectors, functionArguments, functionStateMutability } from 'https://cdn.jsdelivr.net/npm/evmole@0.5.1/dist/evmole.mjs';
+import { contractInfo } from 'https://cdn.jsdelivr.net/npm/evmole@0.8.5/dist/evmole.mjs';
+
+const evmoleFunctionCache = new Map();
+
+function getEvmoleFunctions(bytecode) {
+  const code = String(bytecode || '').trim();
+  if (!code) return [];
+  if (evmoleFunctionCache.has(code)) return evmoleFunctionCache.get(code);
+
+  const info = contractInfo(code, {
+    selectors: true,
+    arguments: true,
+    stateMutability: true
+  });
+  const functions = Array.isArray(info?.functions)
+    ? info.functions.map(fn => ({
+      selector: normalizeSelector(fn.selector),
+      arguments: Array.isArray(fn.arguments) ? fn.arguments.join(',') : String(fn.arguments || ''),
+      stateMutability: String(fn.stateMutability || '')
+    })).filter(fn => fn.selector)
+    : [];
+
+  evmoleFunctionCache.set(code, functions);
+  return functions;
+}
+
+function functionSelectors(bytecode) {
+  return getEvmoleFunctions(bytecode).map(fn => fn.selector.replace(/^0x/, ''));
+}
+
+function getEvmoleFunction(bytecode, selector) {
+  const normalizedSelector = normalizeSelector(selector);
+  return normalizedSelector
+    ? getEvmoleFunctions(bytecode).find(fn => fn.selector === normalizedSelector)
+    : null;
+}
+
+function functionArguments(bytecode, selector) {
+  return getEvmoleFunction(bytecode, selector)?.arguments || '';
+}
+
+function functionStateMutability(bytecode, selector) {
+  return getEvmoleFunction(bytecode, selector)?.stateMutability || '';
+}
 
 // Proxy storage slots
 const PROXY_SLOTS = {
