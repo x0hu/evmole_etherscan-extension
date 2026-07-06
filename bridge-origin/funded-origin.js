@@ -24,6 +24,15 @@
         return String(hash || '').trim().toLowerCase();
     }
 
+    function getBridgeSide(match, names) {
+        for (const name of names) {
+            const side = match?.[name];
+            if (!side) continue;
+            return typeof side === 'string' ? { address: side } : side;
+        }
+        return null;
+    }
+
     function sendBridgeLookupMessage(txHash) {
         return new Promise((resolve, reject) => {
             if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
@@ -69,27 +78,36 @@
     function pickOrigin(data, txHash) {
         const matches = Array.isArray(data?.matches) ? data.matches : [];
         const normalizedTxHash = normalizeHash(txHash);
-        const exactMatch = matches.find(match =>
-            normalizeHash(match?.sender?.txHash) === normalizedTxHash ||
-            normalizeHash(match?.receiver?.txHash) === normalizedTxHash
-        );
+        const exactMatch = matches.find(match => {
+            const sender = getBridgeSide(match, ['sender', 'from', 'source', 'origin']);
+            const receiver = getBridgeSide(match, ['receiver', 'to', 'destination']);
+            const senderTxHash = normalizeHash(sender?.txHash);
+            const receiverTxHash = normalizeHash(receiver?.txHash);
+            return senderTxHash === normalizedTxHash || receiverTxHash === normalizedTxHash;
+        });
         const match = exactMatch || matches[0];
-        const sender = match?.sender;
+        const sender = getBridgeSide(match, ['sender', 'from', 'source', 'origin']);
+        const receiver = getBridgeSide(match, ['receiver', 'to', 'destination']);
+        const senderTxHash = normalizeHash(sender?.txHash);
+        const origin = senderTxHash === normalizedTxHash && receiver?.address
+            ? receiver
+            : sender;
 
-        if (!sender?.address) return null;
+        if (!origin?.address) return null;
 
         return {
             provider: match?.provider || 'bridge',
-            address: sender.address,
-            chainId: sender.chainId,
-            chainName: sender.chainName,
+            address: origin.address,
+            chainId: origin.chainId,
+            chainName: origin.chainName,
         };
     }
 
     function getExplorerUrl(origin) {
         const explorers = window.EvmoleBridgeOriginExplorers;
-        if (explorers?.getExplorerUrl && origin.chainId) {
-            return explorers.getExplorerUrl(origin.chainId, origin.address);
+        const chainIdOrName = origin.chainId || origin.chainName;
+        if (explorers?.getExplorerUrl && chainIdOrName) {
+            return explorers.getExplorerUrl(chainIdOrName, origin.address);
         }
         return `${window.location.origin}/address/${origin.address}`;
     }
