@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Evmole for Etherscan",
   "version": "1.0",
-  "description": "Displays function selectors for Ethereum contracts on Etherscan",
+  "description": "Contract analysis and bridge-origin tools for EVM explorers and Solscan",
   "icons": {
     "16": "icons/evmole-16.png",
     "32": "icons/evmole-32.png",
@@ -37,6 +37,13 @@
     "type": "module"
   },
   "content_scripts": [
+    {
+      "matches": ["https://solscan.io/account/*"],
+      "js": [
+        "bridge-origin/chain-explorers.js",
+        "bridge-origin/solscan-origin.js"
+      ]
+    },
     {
       "matches": [
         "https://etherscan.io/address/*",

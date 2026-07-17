@@ -113,10 +113,15 @@ export async function handleFetchTokenUri(message, sendResponse) {
     }
 }
 
+export function isValidBridgeLookupInput(value) {
+    return /^0x[a-fA-F0-9]{64}$/.test(value) ||
+        /^[1-9A-HJ-NP-Za-km-z]{80,100}$/.test(value);
+}
+
 export function handleBridgeOriginLookup(message, sendResponse) {
     const txHash = String(message.txHash || '').trim();
-    if (!/^0x[a-fA-F0-9]{64}$/.test(txHash)) {
-        sendResponse({ ok: false, error: 'Invalid transaction hash' });
+    if (!isValidBridgeLookupInput(txHash)) {
+        sendResponse({ ok: false, error: 'Invalid bridge lookup input' });
         return false;
     }
 

@@ -11,7 +11,7 @@ Chrome extension for Etherscan-style explorers that adds contract-analysis and t
 - List-page QOL actions like quick "Incoming" / "CA Create" filters
 - Auto-sets transaction list page size to 100 when supported
 
-Supported explorers include Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, Snowtrace/Snowscan, Polygonscan, Optimistic Etherscan, Lineascan, Worldscan, Scrollscan, and other Etherscan-family scanners configured in `manifest.json`.
+Supported explorers include Etherscan, Basescan, Blastscan, BSCScan, Arbiscan, Snowtrace/Snowscan, Polygonscan, Optimistic Etherscan, Lineascan, Worldscan, Scrollscan, and other Etherscan-family scanners configured in `manifest.json`. Solscan account pages also support bridge-origin lookups using the same explorer registry in `bridge-origin/chain-explorers.js`.
 
 ## Screenshot
 

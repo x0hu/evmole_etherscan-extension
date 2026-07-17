@@ -14,6 +14,7 @@ import {
     OPENROUTER_SUMMARY_TYPE,
 } from '../constants.js';
 import { buildCodexSelectorNamesRequestBody, readCodexSseText } from '../codex-client.js';
+import { handleBridgeOriginLookup, isValidBridgeLookupInput } from '../fetch-tools.js';
 import {
     acceptableSelectorNames,
     assessSelectorNameQuality,
@@ -38,6 +39,51 @@ function makeSelectorContext(count) {
             .map(entry => `${entry.selector} ${entry.args} ${entry.mutability} Unknown`)
             .join('\n'),
     };
+}
+
+function testBridgeLookupInputValidation() {
+    const evmHash = `0x${'a'.repeat(64)}`;
+    const solanaSignature = '5'.repeat(88);
+
+    assert.equal(isValidBridgeLookupInput(evmHash), true);
+    assert.equal(isValidBridgeLookupInput(solanaSignature), true);
+    assert.equal(isValidBridgeLookupInput('0'.repeat(88)), false);
+    assert.equal(isValidBridgeLookupInput('not-a-transaction'), false);
+}
+
+async function testSolanaBridgeLookupRequest() {
+    const solanaSignature = '5'.repeat(88);
+    const originalFetch = globalThis.fetch;
+    let requestedUrl = '';
+
+    globalThis.fetch = async url => {
+        requestedUrl = String(url);
+        return new Response(JSON.stringify({ matches: [] }), {
+            headers: { 'content-type': 'application/json' },
+            status: 200,
+        });
+    };
+
+    try {
+        await new Promise((resolve, reject) => {
+            const keepChannelOpen = handleBridgeOriginLookup({ txHash: solanaSignature }, response => {
+                try {
+                    assert.deepEqual(response, { ok: true, data: { matches: [] } });
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            });
+            assert.equal(keepChannelOpen, true);
+        });
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(
+        requestedUrl,
+        `https://bridge-fetchagg.vercel.app/api/transaction-hash?txHash=${solanaSignature}`,
+    );
 }
 
 function testSelectorNamePartialCoverage() {
@@ -238,6 +284,8 @@ async function testRouterDispatch() {
 }
 
 testSelectorNamePartialCoverage();
+testBridgeLookupInputValidation();
+await testSolanaBridgeLookupRequest();
 testSelectorNameFiltering();
 testSelectorNameRejectsAbiShapeNames();
 testCodexSelectorNamesCompactPrompt();

@@ -24,5 +24,9 @@ assert.equal(
     explorers.getExplorerUrl(100000031, address),
     `https://mega.etherscan.io/address/${address}`,
 );
+assert.equal(
+    explorers.getExplorerUrl('solana', address),
+    `https://solscan.io/account/${address}`,
+);
 
 console.log('chain explorers harness passed');
