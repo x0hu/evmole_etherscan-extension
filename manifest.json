@@ -82,6 +82,10 @@
         "https://sonicscan.org/token/*",
         "https://sonicscan.org/tx*",
         "https://sonicscan.org/txs*",
+        "https://stablescan.xyz/address/*",
+        "https://stablescan.xyz/token/*",
+        "https://stablescan.xyz/tx*",
+        "https://stablescan.xyz/txs*",
         "https://hyperevmscan.io/address/*",
         "https://hyperevmscan.io/token/*",
         "https://hyperevmscan.io/tx*",
@@ -179,6 +183,8 @@
         "https://uniscan.xyz/tx/*",
         "https://sonicscan.org/address/*",
         "https://sonicscan.org/tx/*",
+        "https://stablescan.xyz/address/*",
+        "https://stablescan.xyz/tx/*",
         "https://hyperevmscan.io/address/*",
         "https://hyperevmscan.io/tx/*",
         "https://polygonscan.com/address/*",
@@ -229,6 +235,7 @@
         "https://snowscan.xyz/tx/*",
         "https://uniscan.xyz/tx/*",
         "https://sonicscan.org/tx/*",
+        "https://stablescan.xyz/tx/*",
         "https://hyperevmscan.io/tx/*",
         "https://polygonscan.com/tx/*",
         "https://optimistic.etherscan.io/tx/*",
@@ -255,7 +262,7 @@
     {
       "resources": ["evmole-script.js", "styles.css", "chain-rpcs.json", "event-log-decoder/event_log_view_bridge.js", "calldata-view-bridge.js"],
       "matches": ["https://etherscan.io/*", "https://basescan.org/*", "https://blastscan.io/*", "https://bscscan.com/*", "https://arbiscan.io/*", "https://snowtrace.io/*", "https://snowscan.xyz/*",
-      "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
+      "https://uniscan.xyz/*", "https://sonicscan.org/*", "https://stablescan.xyz/*", "https://hyperevmscan.io/*", "https://polygonscan.com/*", "https://optimistic.etherscan.io/*", "https://lineascan.build/*",
       "https://worldscan.org/*", "https://abscan.org/*", "https://testnet.monadscan.com/*", "https://era.zksync.network/*", "https://scrollscan.com/*", "https://berascan.com/*", "https://apescan.io/*", "https://mantlescan.xyz/*",
       "https://monadscan.com/*", "https://sepolia.etherscan.io/*", "https://sepolia.basescan.org/*", "https://sepolia.etherscan.io/*", "https://mega.etherscan.io/*"]
     }
