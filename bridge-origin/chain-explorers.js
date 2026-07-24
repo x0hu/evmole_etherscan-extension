@@ -24,6 +24,7 @@
         { chainId: '480', name: 'World Chain', explorer: 'https://worldscan.org/address/', aliases: ['worldchain', 'wc'] },
         { chainId: '690', name: 'Redstone', explorer: 'https://explorer.redstone.xyz/address/', aliases: ['redstone'] },
         { chainId: '747', name: 'Flow', explorer: 'https://evm.flowscan.io/address/', aliases: ['flow'], debridgeIds: [100000009] },
+        { chainId: '988', name: 'Stable Chain', explorer: 'https://stablescan.xyz/address/', aliases: ['stable'] },
         { chainId: '999', name: 'HyperEVM', explorer: 'https://hyperevmscan.io/address/', aliases: ['hyperevm', 'hyperliquid'], debridgeIds: [100000022] },
         { chainId: '1088', name: 'Metis', explorer: 'https://andromeda-explorer.metis.io/address/', aliases: ['metis'], debridgeIds: [100000004] },
         { chainId: '1329', name: 'Sei', explorer: 'https://seitrace.com/address/', aliases: ['sei'], debridgeIds: [100000027] },

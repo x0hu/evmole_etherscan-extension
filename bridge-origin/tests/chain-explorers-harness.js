@@ -16,9 +16,14 @@ assert.equal(explorers.getChainIdFromDebridge('RobinhoodChain'), '4663');
 assert.equal(explorers.getChainIdFromDebridge(100000001), '245022934');
 assert.equal(explorers.getChainIdFromDebridge('100000031'), '4326');
 assert.equal(explorers.getChainIdFromName('base'), '8453');
+assert.equal(explorers.getChainIdFromName('Stable Chain'), '988');
 assert.equal(
     explorers.getExplorerUrl('Robinhood Chain', address),
     `https://robinhoodchain.blockscout.com/address/${address}`,
+);
+assert.equal(
+    explorers.getExplorerUrl('stable', address),
+    `https://stablescan.xyz/address/${address}`,
 );
 assert.equal(
     explorers.getExplorerUrl(100000031, address),

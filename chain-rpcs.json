@@ -109,6 +109,11 @@
       "https://rpc.soniclabs.com"
     ]
   },
+  "stablescan.xyz": {
+    "rpcs": [
+      "https://rpc.stable.xyz"
+    ]
+  },
   "lineascan.build": {
     "rpcs": [
       "https://rpc.linea.build",
