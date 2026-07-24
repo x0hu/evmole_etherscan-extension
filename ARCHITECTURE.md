@@ -6,15 +6,17 @@ Detailed breakdown of the EVMole Etherscan Extension codebase. ~4,500 lines of r
 
 | File | Lines | Role |
 |------|-------|------|
-| `manifest.json` | 255 | MV3 config: content script groups, permissions, supported domains |
+| `manifest.json` | 278 | MV3 config: content script groups, permissions, supported domains |
 | `chain-rpcs.json` | 178 | Shared RPC endpoint registry used by contract analysis |
 | `content.js` | 502 | Main content script: right-side panel, selector display, query execution |
 | `evmole-script.js` | 1427 | Page-context module: bytecode extraction, proxy detection, hedged RPC |
 | `decode_calldata.js` | 2141 | Tx-page calldata decoder: ABI guesser, adapters, nested decode UI |
 | `event-log-decoder/event_log_decoder.js` | 1242 | Tx receipt event-log handler: leaves named rows native, defaults native ABI rows to ABI, decodes unnamed Dec/Hex-only rows with event head/tail + Swiss Knife-style ABI structure guessing, and background-prepopulates `/tx/*` logs |
 | `event-log-decoder/event_log_view_bridge.js` | 68 | Page-context bridge for invoking native explorer event-log view switches |
+| `bridge-origin/funded-origin.js` | 322 | Funded transaction bridge-origin lookup UI for Etherscan-family explorers and RH-scan |
 | `etherscan_contract_info.js` | 167 | Left-side panel: NatSpec/header comment extraction from source |
 | `qol_buttons.js` | 328 | UX buttons: Incoming/CA Create filters, funded tx copy, 100-row auto-select |
+| `rh_scan_address_qol.js` | 186 | Isolated RH-scan address-page Incoming/CC toolbar integration |
 | `remove_from_page_qol.js` | 131 | Early ad/sponsored element removal (runs at document_start) |
 | `styles.css` | 478 | Dark theme panel + decoded output styling |
 
@@ -22,23 +24,25 @@ Detailed breakdown of the EVMole Etherscan Extension codebase. ~4,500 lines of r
 
 Every page load creates two isolated worlds:
 
-1. **Content script context** — `content.js`, `decode_calldata.js`, `etherscan_contract_info.js`, `qol_buttons.js`, `remove_from_page_qol.js`. Has `chrome.*` API access, manipulates the DOM directly.
+1. **Content script context** — `content.js`, `decode_calldata.js`, `etherscan_contract_info.js`, `qol_buttons.js`, `rh_scan_address_qol.js`, `remove_from_page_qol.js`. Has `chrome.*` API access, manipulates the DOM directly.
 
 2. **Page context** — `evmole-script.js`. Injected as `<script type="module">` so it can import the EVMole library from CDN and make direct `fetch()` calls to RPC endpoints (content scripts can't do cross-origin fetches without host permissions). Communicates back to the content script world via `window.postMessage`.
 
 ## Content Script Groups (manifest.json)
 
-Three injection groups with different triggers:
+Five injection groups with different triggers:
 
 | Group | Scripts | Pages | Timing |
 |-------|---------|-------|--------|
-| 1 | `content.js`, `etherscan_contract_info.js`, `qol_buttons.js` | `/address/*`, `/token/*`, `/tx*`, `/txs*` | document_idle |
-| 2 | `remove_from_page_qol.js` + `.css` | `/address/*`, `/tx*` | document_start |
-| 3 | `decode_calldata.js`, `event-log-decoder/event_log_decoder.js` | `/tx/*` only | document_idle |
+| RH-scan | `bridge-origin/chain-explorers.js`, `rh_scan_address_qol.js`, `bridge-origin/funded-origin.js` | `rh-scan.xyz/address/*` only | document_idle |
+| Solscan | `bridge-origin/chain-explorers.js`, `bridge-origin/solscan-origin.js` | `solscan.io/account/*` only | document_idle |
+| Etherscan family | `content.js`, `etherscan_contract_info.js`, `qol_buttons.js` | `/address/*`, `/token/*`, `/tx*`, `/txs*` | document_idle |
+| Early cleanup | `remove_from_page_qol.js` + `.css` | `/address/*`, `/tx*` | document_start |
+| Transaction decode | `decode_calldata.js`, `event-log-decoder/event_log_decoder.js` | `/tx/*` only | document_idle |
 
 Web-accessible resources: `evmole-script.js`, `styles.css`, `chain-rpcs.json`, and `event-log-decoder/event_log_view_bridge.js` (needed for page-context injection, panel styling, contract-analysis RPC configuration, and native event-log ABI switching).
 
-Supported explorers: 30+ Etherscan-family domains (Ethereum, Base, Arbitrum, Optimism, Polygon, Avalanche, BSC, zkSync, Scroll, Linea, Blast, Fraxtal, Taiko, HyperEVM, Monad, MegaETH, and their testnets).
+Supported explorers: 30+ Etherscan-family domains (Ethereum, Base, Arbitrum, Optimism, Polygon, Avalanche, BSC, zkSync, Scroll, Linea, Blast, Fraxtal, Taiko, HyperEVM, Monad, MegaETH, and their testnets), plus an isolated address-toolbar integration for RH-scan.
 
 ---
 
@@ -277,6 +281,14 @@ Two injection strategies based on explorer:
 - Retries every 100ms for up to 5 seconds (elements may load asynchronously)
 
 All features use MutationObserver for SPA re-triggers on URL changes.
+
+### RH-scan Address Toolbar (`rh_scan_address_qol.js`)
+- Runs only on `https://rh-scan.xyz/address/*`
+- Adds `View Incoming` and `View CC` buttons immediately after `Download Page Data`
+- Invokes RH-scan's own React filter actions instead of duplicating its filter state logic
+- Hides the duplicate Incoming and Contract Creation entries from the native filter dropdown
+- Re-injects the buttons if RH-scan replaces the toolbar during a client-side render
+- Adds a `Bridge Origin` lookup beside the Funded By transaction through the shared bridge API/cache logic in `bridge-origin/funded-origin.js`
 
 ---
 

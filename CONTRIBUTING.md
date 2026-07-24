@@ -12,8 +12,10 @@ Chrome extension (Manifest V3) that adds function selector panels and QOL button
 ├── content.js                     # Main content script: injects panel UI, handles selector display + query results
 ├── evmole-script.js               # Web-accessible module: EVMole extraction, proxy detection, RPC queries (runs in page context)
 ├── decode_calldata.js             # Content script for /tx pages: decodes calldata with ABI guessing + adapter system
+├── bridge-origin/funded-origin.js # Shared funded-transaction bridge-origin lookup UI
 ├── etherscan_contract_info.js     # Content script: extracts/displays contract header comments from source code
 ├── qol_buttons.js                 # Content script: adds "Incoming" / "CA Create" buttons, auto-selects 100 rows
+├── rh_scan_address_qol.js         # Isolated RH-scan address-page Incoming/CC toolbar integration
 ├── styles.css                     # Web-accessible stylesheet for the function selector panel
 ├── README.md                      # Install + usage docs
 ├── .gitignore                     # Ignores .devcontainer
@@ -35,8 +37,10 @@ Chrome extension (Manifest V3) that adds function selector panels and QOL button
 | `content.js` | Entry point for contract pages. Creates collapsible right-side panel, injects `evmole-script.js`, listens for `postMessage` results, keeps query dropdown interactions open, and linkifies returned addresses to `/<address>` on current explorer host |
 | `evmole-script.js` | ES module in page context. Extracts selectors with EVMole, detects proxies (EIP-1967/1822/1167), performs hedged JSON-RPC calls with cooldown for failing endpoints, and applies Safe proxy runtime fallbacks |
 | `decode_calldata.js` | IIFE for tx pages. Full ABI decoder with signature lookup (OpenChain + 4byte), backtracking ABI structure guesser, adapter system for ERC-4337/7579, nested decode + unit conversion UI |
+| `bridge-origin/funded-origin.js` | Adds bridge-origin lookup controls to funded transactions on Etherscan-family explorers and RH-scan |
 | `etherscan_contract_info.js` | Fetches contract source, extracts NatSpec/header comments, displays in left-side panel |
 | `qol_buttons.js` | Adds "Incoming" and "CA Create" filter buttons on tx list pages, auto-sets 100 records/page |
+| `rh_scan_address_qol.js` | Adds RH-scan-only `View Incoming` and `View CC` buttons beside its address-page download control |
 | `styles.css` | Dark theme panel styles, collapsed/expanded states, query result formatting, tuple display |
 
 ## Getting Started

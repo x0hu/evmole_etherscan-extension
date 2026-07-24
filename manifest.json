@@ -38,6 +38,14 @@
   },
   "content_scripts": [
     {
+      "matches": ["https://rh-scan.xyz/address/*"],
+      "js": [
+        "bridge-origin/chain-explorers.js",
+        "rh_scan_address_qol.js",
+        "bridge-origin/funded-origin.js"
+      ]
+    },
+    {
       "matches": ["https://solscan.io/account/*"],
       "js": [
         "bridge-origin/chain-explorers.js",

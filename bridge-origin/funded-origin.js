@@ -2,6 +2,8 @@
     'use strict';
 
     const LOOKUP_MESSAGE_TYPE = 'EVMOLE_BRIDGE_ORIGIN_LOOKUP';
+    const RH_SCAN_HOSTNAME = 'rh-scan.xyz';
+    const RH_SCAN_LOOKUP_CLASS = 'evmole-rh-scan-bridge-origin-lookup';
     const lookupCache = new Map();
 
     function extractTxHashFromHref(href) {
@@ -128,8 +130,44 @@
         return Boolean(container.querySelector(`.evmole-bridge-origin-lookup[data-tx-hash="${txHash.toLowerCase()}"]`));
     }
 
+    function createRhScanLookupIcon() {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('width', '13');
+        svg.setAttribute('height', '13');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.5');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.style.display = 'block';
+
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M6 19c0-3 2-5 5-5h2c3 0 5-2 5-5M6 19l3-3M6 19l3 3M18 9l-3-3M18 9l-3 3');
+        svg.appendChild(path);
+        return svg;
+    }
+
+    function isRhScanLookupButton(button) {
+        return button.classList.contains(RH_SCAN_LOOKUP_CLASS);
+    }
+
     function setButtonIcon(button, className) {
         button.replaceChildren();
+
+        if (isRhScanLookupButton(button)) {
+            button.appendChild(createRhScanLookupIcon());
+            const label = document.createElement('span');
+            label.textContent = className.includes('spinner')
+                ? 'Finding...'
+                : className.includes('exclamation')
+                    ? 'Try Again'
+                    : 'Bridge Origin';
+            button.appendChild(label);
+            return;
+        }
+
         const icon = document.createElement('i');
         icon.className = className;
         button.appendChild(icon);
@@ -173,10 +211,18 @@
         button.replaceChildren(span);
     }
 
-    function createLookupButton(txHash) {
+    function createLookupButton(txHash, variant = 'etherscan') {
         const button = document.createElement('a');
         button.href = '#';
-        button.className = 'js-bridge-origin link-secondary evmole-bridge-origin-lookup d-inline-flex align-items-center';
+        if (variant === 'rh-scan') {
+            button.className = `iconbtn evmole-bridge-origin-lookup ${RH_SCAN_LOOKUP_CLASS}`;
+            button.style.height = '25px';
+            button.style.padding = '0 7px';
+            button.style.gap = '5px';
+            button.style.fontSize = '11.5px';
+        } else {
+            button.className = 'js-bridge-origin link-secondary evmole-bridge-origin-lookup d-inline-flex align-items-center';
+        }
         button.dataset.txHash = txHash.toLowerCase();
         button.dataset.lookupState = 'idle';
         button.setAttribute('data-bs-toggle', 'tooltip');
@@ -214,8 +260,27 @@
         return button;
     }
 
+    function addRhScanBridgeOriginLookupButton() {
+        if (window.location.hostname !== RH_SCAN_HOSTNAME) return false;
+
+        const fundedHeader = Array.from(document.querySelectorAll('.thead'))
+            .find(element => String(element.textContent || '').trim().toLowerCase() === 'funded by');
+        const fundedRow = fundedHeader?.nextElementSibling;
+        const fundedContent = fundedRow?.firstElementChild;
+        const txLink = Array.from(fundedContent?.querySelectorAll('a[href*="/tx/"]') || [])
+            .find(link => extractTxHashFromHref(link.href));
+        const txHash = txLink ? extractTxHashFromHref(txLink.href) : null;
+
+        if (!fundedContent || !txLink || !txHash || hasLookupButtonForTx(fundedContent, txHash)) {
+            return false;
+        }
+
+        txLink.insertAdjacentElement('afterend', createLookupButton(txHash, 'rh-scan'));
+        return true;
+    }
+
     function addBridgeOriginLookupButtons() {
-        let added = false;
+        let added = addRhScanBridgeOriginLookupButton();
         const copyButtons = document.querySelectorAll('a.evmole-funded-tx-copy');
 
         copyButtons.forEach(copyButton => {
